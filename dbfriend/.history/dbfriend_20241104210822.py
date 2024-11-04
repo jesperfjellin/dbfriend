@@ -46,33 +46,16 @@ logging.basicConfig(
 logger = logging.getLogger("rich")
 
 def parse_arguments():
-    help_text = """
-Usage:
-    dbfriend <username> <dbname> <filepath> [options]
-
-Positional Arguments:
-    <username>    Database user
-    <dbname>      Database name
-    <filepath>    Path to data files
-
-Options:
-    --help            Show this help message and exit
-    --overwrite       Overwrite existing tables without prompting.
-    --rename-geom     Automatically rename geometry columns to "geom" without prompting.
-    --log-level       Set the logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-    --host            Database host (default: localhost).
-    --port            Database port (default: 5432).
-    --epsg            Target EPSG code for the data. If not specified, will preserve source CRS or default to 4326.
-
-Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
-"""
-    # If --help is passed, print help and exit
-    if '--help' in sys.argv:
-        console.print(help_text)
+    # First check if user is requesting help
+    if len(sys.argv) > 1 and sys.argv[1].lower() == 'help':
+        display_help()
         sys.exit(0)
 
-    # Custom argument parser that only uses --help
-    parser = argparse.ArgumentParser(add_help=False)  # Disable all default help
+    # Then proceed with normal argument parsing
+    parser = argparse.ArgumentParser(
+        description='Load spatial data into PostGIS with compatibility checks.',
+        add_help=True  # Enable default help
+    )
 
     # Define positional arguments
     parser.add_argument('dbuser', help='Database user')
@@ -80,8 +63,6 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
     parser.add_argument('filepath', help='Path to data files')
 
     # Define optional arguments
-    parser.add_argument('--help', action='store_true', 
-                       help='Show this help message and exit')
     parser.add_argument('--overwrite', action='store_true', 
                        help='Overwrite existing tables without prompting')
     parser.add_argument('--rename-geom', action='store_true', 
@@ -396,36 +377,34 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
         
         # Compare attributes with all existing records having the same geom_hash
         if common_columns:
-            current_attrs = {col: str(row[col]).strip() if pd.notnull(row[col]) else None 
-                           for col in common_columns}
+            current_attrs = {col: row[col] for col in common_columns}
             
-            logger.debug(f"\nComparing record:")
+            # Debug current record
+            logger.debug(f"\nChecking record with hash {geom_hash}:")
             logger.debug(f"Current attributes: {current_attrs}")
-            logger.debug(f"Existing records: {existing_records[geom_hash]}")
+            logger.debug(f"Existing records for this hash: {existing_records[geom_hash]}")
             
-            # Compare with existing records
+            # Check if this exact record already exists
             found_match = False
             for existing_attrs in existing_records[geom_hash]:
-                # Normalize existing attributes the same way
-                existing_attrs = {col: str(val).strip() if val is not None else None 
-                                for col, val in existing_attrs.items()}
+                # Compare each attribute
+                all_match = True
+                for col in common_columns:
+                    current_val = str(current_attrs.get(col, '')).strip()
+                    existing_val = str(existing_attrs.get(col, '')).strip()
+                    if current_val != existing_val:
+                        logger.debug(f"Mismatch in column {col}: current='{current_val}' existing='{existing_val}'")
+                        all_match = False
+                        break
                 
-                if current_attrs == existing_attrs:
-                    logger.debug("Found exact match")
+                if all_match:
+                    logger.debug("Found exact attribute match - marking as identical")
                     identical_geometries.append(row)
                     found_match = True
                     break
-                else:
-                    # Log differences
-                    differences = {
-                        col: (current_attrs.get(col), existing_attrs.get(col))
-                        for col in common_columns
-                        if current_attrs.get(col) != existing_attrs.get(col)
-                    }
-                    logger.debug(f"Differences found: {differences}")
             
             if not found_match:
-                logger.debug("No match found - marking as updated")
+                logger.debug("No exact match found - marking as updated")
                 updated_geometries.append(row)
             
             processed_geom_hashes.add(geom_hash)
@@ -588,7 +567,7 @@ def process_files(args, conn, existing_tables):
             if args.rename_geom:
                 action = 'y'
             else:
-                action = input(f"         Geometry column detected as '{geom_col}' for files:\n         {formatted_files}\n         Rename to 'geom'? (y/n): ")
+                action = input(f"Geometry column detected as '{geom_col}' for files:\n         {formatted_files}\n         Rename to 'geom'? (y/n): ")
             if action.lower() == 'y':
                 for info in file_info_list:
                     info['gdf'] = info['gdf'].rename_geometry('geom')
