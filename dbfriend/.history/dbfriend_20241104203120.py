@@ -432,39 +432,13 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
         temp_table = f"temp_{table_name}"
         gdf.to_postgis(temp_table, engine, if_exists='replace', index=False)
 
+        # Update main table from temp table
         with engine.connect() as connection:
             from sqlalchemy import text
             
-            # First, check for and add any new columns
-            cursor = connection.execute(text(f"""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_schema = 'public' AND table_name = '{table_name}'
-            """))
-            existing_columns = {row[0] for row in cursor}
-            
-            # Get new columns from the GeoDataFrame
-            new_columns = set(gdf.columns) - existing_columns
-            
-            # Add any new columns to the main table
-            for col in new_columns:
-                # Determine column type from GeoDataFrame
-                dtype = gdf[col].dtype
-                if dtype == 'object':
-                    sql_type = 'TEXT'
-                elif dtype == 'int64':
-                    sql_type = 'INTEGER'
-                elif dtype == 'float64':
-                    sql_type = 'DOUBLE PRECISION'
-                else:
-                    sql_type = 'TEXT'  # Default to TEXT for unknown types
-                
-                logger.info(f"Adding new column '{col}' with type {sql_type}")
-                connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS "{col}" {sql_type}'))
-            
-            # Now proceed with the update
+            # Get all columns except the unique ID
             columns = [col for col in gdf.columns if col != unique_id_column]
-            update_cols = ", ".join([f'"{col}" = s."{col}"' for col in columns])
+            update_cols = ", ".join([f"{col} = s.{col}" for col in columns])
             
             sql = text(f"""
                 UPDATE "{table_name}" t
