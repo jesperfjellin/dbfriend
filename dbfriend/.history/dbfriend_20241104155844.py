@@ -334,6 +334,7 @@ def process_files(args, conn, existing_tables):
             table_name = info['table_name']
             input_geom_col = info['input_geom_col']
             
+            # Update logging messages
             logger.info(f"Processing {file}")
             
             if table_name in existing_tables:
@@ -343,26 +344,33 @@ def process_files(args, conn, existing_tables):
                     info['gdf'], conn, table_name, info['input_geom_col']
                 )
                 
-                if new_geoms is not None:
-                    logger.info(f"Found {len(new_geoms)} new geometries to append")
-                    try:
-                        new_geoms.to_postgis(table_name, engine, if_exists='append', index=False)
-                        logger.info(f"Successfully appended new geometries to {table_name}")
-                    except Exception as e:
-                        logger.error(f"Error appending new geometries: {e}")
+                # Handle updates and new geometries
+                if new_geoms is not None or updated_geoms is not None:
+                    # ... handle updates ...
+                    pass
                 
+                # Skip the rest of the loop since we've handled the existing table
+                progress.advance(task)
+                continue  # Add this line to skip the subsequent write operation
+
+            # This part should only run for new tables
+            gdf = check_crs_compatibility(info['gdf'], conn, table_name, info['input_geom_col'], args)
+            if gdf is None:
                 progress.advance(task)
                 continue
-            
-            # Only for new tables
+
+            # Write to PostGIS
             try:
-                info['gdf'].to_postgis(table_name, engine, if_exists='replace', index=False)
+                gdf.to_postgis(table_name, engine, if_exists='replace', index=False)
                 logger.info(f"Imported '{file}' to table '{table_name}'")
-                create_spatial_index(conn, table_name, geom_column=input_geom_col)
-                existing_tables.append(table_name)
+                existing_tables.append(table_name)  # Add to existing_tables after successful import
             except Exception as e:
                 logger.error(f"[red]Error importing '{file}': {e}[/red]")
-            
+                progress.advance(task)
+                continue
+
+            # Create spatial index
+            create_spatial_index(conn, table_name, geom_column=input_geom_col)
             progress.advance(task)
 
 def check_crs_compatibility(gdf, conn, table_name, geom_column, args):

@@ -7,10 +7,6 @@ import psycopg2
 from sqlalchemy import create_engine
 import logging
 import getpass
-import hashlib
-import json
-import geopandas as gpd
-from geopandas import GeoDataFrame
 from collections import defaultdict
 from pathlib import Path
 from rich.console import Console
@@ -211,7 +207,7 @@ def compare_geometries(gdf, conn, table_name, geom_column='geom'):
     identical_geometries = []
     
     for idx, row in gdf.iterrows():
-        wkt = row[geom_column].wkt
+        wkt = row.geometry.wkt
         # Create a comparable hash of the new record
         row_dict = row[common_columns].to_dict()
         row_dict[geom_column] = wkt
@@ -226,9 +222,9 @@ def compare_geometries(gdf, conn, table_name, geom_column='geom'):
     
     cursor.close()
     return (
-        GeoDataFrame(new_geometries, geometry=geom_column, crs="EPSG:4326") if new_geometries else None,
-        GeoDataFrame(updated_geometries, geometry=geom_column, crs="EPSG:4326") if updated_geometries else None,
-        GeoDataFrame(identical_geometries, geometry=geom_column, crs="EPSG:4326") if identical_geometries else None
+        GeoDataFrame(new_geometries) if new_geometries else None,
+        GeoDataFrame(updated_geometries) if updated_geometries else None,
+        GeoDataFrame(identical_geometries) if identical_geometries else None
     )
 
 def process_files(args, conn, existing_tables):
@@ -249,7 +245,6 @@ def process_files(args, conn, existing_tables):
                 # Read the spatial file to get the geometry column name
                 try:
                     gdf = gpd.read_file(full_path)
-                    gdf.set_crs(epsg=4326, inplace=True)  # Set CRS to 4326
                     input_geom_col = gdf.geometry.name
                     file_info_list.append({
                         'file': file,
@@ -285,7 +280,6 @@ def process_files(args, conn, existing_tables):
             if action.lower() == 'y':
                 for info in file_info_list:
                     info['gdf'] = info['gdf'].rename_geometry('geom')
-                    info['gdf'].set_crs(epsg=4326, inplace=True)  # Ensure CRS is maintained
                     info['input_geom_col'] = 'geom'  # Update the geometry column name
                     info['renamed'] = True
                 logger.info("Geometry columns renamed to 'geom'.")
@@ -308,7 +302,6 @@ def process_files(args, conn, existing_tables):
                     for info in file_info_list:
                         if info['input_geom_col'] == geom_col:
                             info['gdf'] = info['gdf'].rename_geometry('geom')
-                            info['gdf'].set_crs(epsg=4326, inplace=True)  # Ensure CRS is maintained
                             info['input_geom_col'] = 'geom'  # Update the geometry column name
                             info['renamed'] = True
                     logger.info(f"Geometry columns renamed to 'geom' for files with '{geom_col}' column.")
@@ -334,6 +327,7 @@ def process_files(args, conn, existing_tables):
             table_name = info['table_name']
             input_geom_col = info['input_geom_col']
             
+            # Update logging messages
             logger.info(f"Processing {file}")
             
             if table_name in existing_tables:
@@ -343,26 +337,79 @@ def process_files(args, conn, existing_tables):
                     info['gdf'], conn, table_name, info['input_geom_col']
                 )
                 
+                if identical_geoms is not None:
+                    logger.info(f"Found {len(identical_geoms)} identical records (will be skipped)")
+                
                 if new_geoms is not None:
                     logger.info(f"Found {len(new_geoms)} new geometries to append")
                     try:
-                        new_geoms.to_postgis(table_name, engine, if_exists='append', index=False)
+                        new_geoms.to_postgis(
+                            table_name, 
+                            engine, 
+                            if_exists='append', 
+                            index=False
+                        )
                         logger.info(f"Successfully appended new geometries to {table_name}")
                     except Exception as e:
                         logger.error(f"Error appending new geometries: {e}")
                 
+                if updated_geoms is not None:
+                    logger.info(f"Found {len(updated_geoms)} geometries with updated attributes")
+                    try:
+                        # Create temporary table for updates
+                        temp_table = f"temp_{table_name}"
+                        updated_geoms.to_postgis(
+                            temp_table, 
+                            engine, 
+                            if_exists='replace', 
+                            index=False
+                        )
+                        
+                        # Update main table from temp table
+                        cursor = conn.cursor()
+                        cursor.execute(f"""
+                            UPDATE "{table_name}" t
+                            SET {
+                                ', '.join(f'"{col}" = s."{col}"' 
+                                for col in updated_geoms.columns 
+                                if col != info['input_geom_col'])
+                            }
+                            FROM "{temp_table}" s
+                            WHERE ST_Equals(t."{info['input_geom_col']}", s."{info['input_geom_col']}")
+                        """)
+                        conn.commit()
+                        
+                        # Clean up temp table
+                        cursor.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+                        conn.commit()
+                        cursor.close()
+                        
+                        logger.info(f"Successfully updated existing geometries in {table_name}")
+                    except Exception as e:
+                        logger.error(f"Error updating geometries: {e}")
+                        conn.rollback()
+                
+                if not any([new_geoms, updated_geoms]):
+                    logger.info(f"No changes needed for {table_name}")
+
+            # CRS Compatibility Check
+            gdf = check_crs_compatibility(info['gdf'], conn, table_name, info['input_geom_col'], args)
+            if gdf is None:
                 progress.advance(task)
-                continue
-            
-            # Only for new tables
+                continue  # Skip this file if CRS is incompatible or an error occurred
+
+            # Write to PostGIS
             try:
-                info['gdf'].to_postgis(table_name, engine, if_exists='replace', index=False)
+                gdf.to_postgis(table_name, engine, if_exists='replace', index=False)
                 logger.info(f"Imported '{file}' to table '{table_name}'")
-                create_spatial_index(conn, table_name, geom_column=input_geom_col)
-                existing_tables.append(table_name)
+                existing_tables.append(table_name)  # Add to existing_tables after successful import
             except Exception as e:
                 logger.error(f"[red]Error importing '{file}': {e}[/red]")
-            
+                progress.advance(task)
+                continue
+
+            # Create spatial index
+            create_spatial_index(conn, table_name, geom_column=input_geom_col)
             progress.advance(task)
 
 def check_crs_compatibility(gdf, conn, table_name, geom_column, args):

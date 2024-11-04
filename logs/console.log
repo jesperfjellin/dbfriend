@@ -1,0 +1,115 @@
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 already exists
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Found 109180 new geometries to append
+Error appending new geometries: You are calling a geospatial method on the GeoDataFrame, but the active geometry column to use has not been set. 
+There are no existing columns with geometry data type. You can add a geometry column as the active geometry column with df.set_geometry. 
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Found 109180 new geometries to append
+Error appending new geometries: The CRS of the target table (EPSG:4326) differs from the CRS of current GeoDataFrame (EPSG:0).
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Found 109180 new geometries to append
+Error appending new geometries: The CRS of the target table (EPSG:4326) differs from the CRS of current GeoDataFrame (EPSG:0).
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Found 109180 new geometries to append
+Successfully appended new geometries to gis_osm_buildings_a_free_1
+Database connection failed: connection to server at "localhost" (::1), port 5432 failed: FATAL:  database "dbfriend" does not exist
+
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Found 109180 new geometries to append
+Successfully appended new geometries to gis_osm_buildings_a_free_1
+Existing SRID for 'gis_osm_buildings_a_free_1' is 4326
+CRS of new data for 'gis_osm_buildings_a_free_1' is EPSG:4326
+CRS is compatible for 'gis_osm_buildings_a_free_1'
+Database connection established ✓
+Geometry columns renamed to 'geom'.
+Processing gis_osm_buildings_a_free_1.geojson
+Table gis_osm_buildings_a_free_1 exists, analyzing differences...
+Found 109180 new geometries to append
+Successfully appended new geometries to gis_osm_buildings_a_free_1
+Processing gis_osm_landuse_a_free_1.geojson
+Table gis_osm_landuse_a_free_1 exists, analyzing differences...
+Found 5882 new geometries to append
+Successfully appended new geometries to gis_osm_landuse_a_free_1
+Processing gis_osm_natural_free_1.geojson
+Table gis_osm_natural_free_1 exists, analyzing differences...
+Found 41186 new geometries to append
+Successfully appended new geometries to gis_osm_natural_free_1
+Processing gis_osm_places_a_free_1.geojson
+Table gis_osm_places_a_free_1 exists, analyzing differences...
+Found 44 new geometries to append
+Successfully appended new geometries to gis_osm_places_a_free_1
+Processing gis_osm_places_free_1.geojson
+Table gis_osm_places_free_1 exists, analyzing differences...
+Found 372 new geometries to append
+Successfully appended new geometries to gis_osm_places_free_1
+Processing gis_osm_pofw_a_free_1.geojson
+Table gis_osm_pofw_a_free_1 exists, analyzing differences...
+Found 95 new geometries to append
+Successfully appended new geometries to gis_osm_pofw_a_free_1
+Processing gis_osm_pois_a_free_1.geojson
+Table gis_osm_pois_a_free_1 exists, analyzing differences...
+Found 3512 new geometries to append
+Successfully appended new geometries to gis_osm_pois_a_free_1
+Processing gis_osm_pois_free_1.geojson
+Table gis_osm_pois_free_1 exists, analyzing differences...
+Found 12964 new geometries to append
+Successfully appended new geometries to gis_osm_pois_free_1
+Processing gis_osm_railways_free_1.geojson
+Table gis_osm_railways_free_1 exists, analyzing differences...
+Found 1882 new geometries to append
+Successfully appended new geometries to gis_osm_railways_free_1
+Processing gis_osm_roads_free_1.geojson
+Table gis_osm_roads_free_1 exists, analyzing differences...
+Found 75597 new geometries to append
+Successfully appended new geometries to gis_osm_roads_free_1
+Processing gis_osm_traffic_a_free_1.geojson
+Table gis_osm_traffic_a_free_1 exists, analyzing differences...
+Found 3201 new geometries to append
+Successfully appended new geometries to gis_osm_traffic_a_free_1
+Processing gis_osm_traffic_free_1.geojson
+Table gis_osm_traffic_free_1 exists, analyzing differences...
+Found 10794 new geometries to append
+Successfully appended new geometries to gis_osm_traffic_free_1
+Processing gis_osm_transport_a_free_1.geojson
+Table gis_osm_transport_a_free_1 exists, analyzing differences...
+Found 8 new geometries to append
+Successfully appended new geometries to gis_osm_transport_a_free_1
+Processing gis_osm_transport_free_1.geojson
+Table gis_osm_transport_free_1 exists, analyzing differences...
+Found 1735 new geometries to append
+Successfully appended new geometries to gis_osm_transport_free_1
+Processing gis_osm_waterways_free_1.geojson
+Table gis_osm_waterways_free_1 exists, analyzing differences...
+Found 1177 new geometries to append
+Successfully appended new geometries to gis_osm_waterways_free_1
+Processing gis_osm_water_a_free_1.geojson
+Table gis_osm_water_a_free_1 exists, analyzing differences...
+Found 625 new geometries to append
+Successfully appended new geometries to gis_osm_water_a_free_1
+All tasks completed ✓
