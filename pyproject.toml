@@ -22,6 +22,9 @@ dependencies = [
     "psycopg2-binary",
     "sqlalchemy",
     "tqdm",
+    "rich",
+    "colorama",
+    "pandas"
 ]
 
 [project.scripts]
