@@ -14,21 +14,15 @@ from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
 # Initialize rich Console
-console = Console(width=100)
+console = Console()
 
 # Configure logging with rich
 logging.basicConfig(
     level=logging.INFO,  # Default level; will be updated based on arguments
     format="%(message)s",
+    datefmt="[%X]",
     handlers=[
-        RichHandler(
-            console=console,
-            rich_tracebacks=True,
-            tracebacks_show_locals=True,
-            show_path=False,  # Removes the file path from each line
-            show_time=False,
-            markup=True
-        )
+        RichHandler(rich_tracebacks=True, tracebacks_show_locals=True)
     ]
 )
 logger = logging.getLogger("rich")
@@ -95,10 +89,10 @@ def connect_db(dbname, dbuser, host, port, password):
             port=port,
             password=password
         )
-        logger.info("Database connection established ✓")
+        logger.info("[green]Database connection established.[/green]")
         return conn
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"[red]Error connecting to database: {e}[/red]")
         sys.exit(1)
 
 def get_existing_tables(conn):
@@ -122,9 +116,9 @@ def create_spatial_index(conn, table_name, geom_column='geom'):
             USING GIST ("{geom_column}");
         """)
         conn.commit()
-        logging.info(f"Spatial index created on table '{table_name}'.")
+        logger.info(f"[cyan]Spatial index '{index_name}' created on table '{table_name}'.[/cyan]")
     except Exception as e:
-        logging.error(f"Error creating spatial index on '{table_name}': {e}")
+        logger.error(f"[red]Error creating spatial index on '{table_name}': {e}[/red]")
         conn.rollback()
     finally:
         cursor.close()
@@ -199,7 +193,7 @@ def process_files(args, conn, existing_tables):
                     continue
 
     if not file_info_list:
-        logger.warning("[red]No spatial files found to process.[/red]")
+        logger.warning("[yellow]No spatial files found to process.[/yellow]")
         return
 
     # Collect geometry column names
@@ -216,13 +210,12 @@ def process_files(args, conn, existing_tables):
             if args.rename_geom:
                 action = 'y'
             else:
-                action = console.input(f"Geometry column detected as '{geom_col}' for files {file_names}. Rename to 'geom'? (y/n): ")
+                action = console.input(f"[yellow]Geometry column detected as '{geom_col}' for files {file_names}. Rename to 'geom'? (y/n): [/yellow]")
             if action.lower() == 'y':
                 for info in file_info_list:
                     info['gdf'] = info['gdf'].rename_geometry('geom')
-                    info['input_geom_col'] = 'geom'  # Update the geometry column name
                     info['renamed'] = True
-                logger.info("Geometry columns renamed to 'geom'.")
+                logger.info("[green]Geometry columns renamed to 'geom'.[/green]")
             else:
                 for info in file_info_list:
                     info['renamed'] = False
@@ -236,14 +229,13 @@ def process_files(args, conn, existing_tables):
                 if args.rename_geom:
                     action = 'y'
                 else:
-                    action = console.input(f"Geometry column detected as '{geom_col}' for files {files}. Rename to 'geom'? (y/n): ")
+                    action = console.input(f"[yellow]Geometry column detected as '{geom_col}' for files {files}. Rename to 'geom'? (y/n): [/yellow]")
                 if action.lower() == 'y':
                     for info in file_info_list:
                         if info['input_geom_col'] == geom_col:
                             info['gdf'] = info['gdf'].rename_geometry('geom')
-                            info['input_geom_col'] = 'geom'  # Update the geometry column name
                             info['renamed'] = True
-                    logger.info(f"Geometry columns renamed to 'geom' for files with '{geom_col}' column.")
+                    logger.info(f"[green]Geometry columns renamed to 'geom' for files with '{geom_col}' column.[/green]")
                 else:
                     for info in file_info_list:
                         if info['input_geom_col'] == geom_col:
@@ -252,63 +244,65 @@ def process_files(args, conn, existing_tables):
     # Initialize rich Progress
     with Progress(
         SpinnerColumn(),
-        TextColumn("[cyan]{task.description:<30}"),  # Fixed width for description
-        BarColumn(bar_width=30),  # Fixed width for progress bar
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
         "[progress.percentage]{task.percentage:>3.0f}%",
         TimeElapsedColumn(),
         console=console,
-        expand=False  # Prevents the progress bar from expanding to full width
+        transient=True  # Ensures progress bar is removed after completion
     ) as progress:
-        task = progress.add_task("Processing files", total=len(file_info_list))
-        
+        task = progress.add_task("[green]Processing files[/green]", total=len(file_info_list))
         for info in file_info_list:
             file = info['file']
             table_name = info['table_name']
-            input_geom_col = info['input_geom_col']
-            
-            # Update logging messages
-            logger.info(f"Processing {file}")
-            
+            gdf = info['gdf']
+            input_geom_col = gdf.geometry.name
+
+            logger.info(f"[blue]Processing file '{file}'.[/blue]")
+
+            # Compatibility Check: Table Name Conflict
             if table_name in existing_tables:
-                logger.warning(f"Table {table_name} already exists")
+                logger.warning(f"[yellow]Table '{table_name}' already exists.[/yellow]")
                 if args.overwrite:
                     action = 'y'
                 else:
-                    action = console.input(f"Table {table_name} exists. Overwrite? (y/n): ")
-                
+                    action = console.input(f"[yellow]Table '{table_name}' exists. Overwrite? (y/n): [/yellow]")
                 if action.lower() != 'y':
-                    logger.info(f"Skipping {file}")
+                    logger.info(f"[green]Skipping '{file}'.[/green]")
                     progress.advance(task)
                     continue
-                
-                logger.info(f"Overwriting table {table_name}")
+                else:
+                    logger.info(f"[green]Overwriting table '{table_name}'.[/green]")
+            else:
+                # Don't add to existing_tables yet; will add after checking
+                pass
 
             # Check if the table exists in the database
             table_exists = check_table_exists(conn, table_name)
             if table_exists:
                 db_geom_col = get_db_geometry_column(conn, table_name)
                 if db_geom_col:
-                    logger.info(f"Geometry column in database table '{table_name}' is '{db_geom_col}'")
-                    if info['input_geom_col'] != db_geom_col:
+                    logger.info(f"[blue]Geometry column in database table '{table_name}' is '{db_geom_col}'.[/blue]")
+                    if input_geom_col != db_geom_col:
                         if args.rename_geom:
                             action = 'y'
                         else:
-                            action = console.input(f"The matching table in the PostGIS database uses '{db_geom_col}' as the geometry column name. Rename input file's geometry column from '{info['input_geom_col']}' to '{db_geom_col}'? (y/n): ")
+                            action = console.input(f"[yellow]The matching table in the PostGIS database uses '{db_geom_col}' as the geometry column name. Rename input file's geometry column from '{input_geom_col}' to '{db_geom_col}'? (y/n): [/yellow]")
                         if action.lower() == 'y':
-                            info['gdf'] = info['gdf'].rename_geometry(db_geom_col)
-                            info['input_geom_col'] = db_geom_col
-                            logger.info(f"Renamed geometry column to '{db_geom_col}'")
+                            gdf = gdf.rename_geometry(db_geom_col)
+                            input_geom_col = db_geom_col
+                            logger.info(f"[green]Renamed geometry column to '{db_geom_col}'.[/green]")
                         else:
-                            logger.info(f"Skipping '{file}' due to geometry column name mismatch")
+                            logger.info(f"[green]Skipping '{file}' due to geometry column name mismatch.[/green]")
                             progress.advance(task)
                             continue
                 else:
-                    logger.info(f"Table '{table_name}' exists but no geometry column found. Skipping CRS compatibility check")
+                    logger.info(f"[blue]Table '{table_name}' exists but no geometry column found. Skipping CRS compatibility check.[/blue]")
             else:
-                logger.info(f"Table '{table_name}' does not exist, skipping geometry/CRS checks.")
+                logger.info(f"[blue]Table '{table_name}' does not exist. Skipping geometry and CRS compatibility checks.[/blue]")
 
             # CRS Compatibility Check
-            gdf = check_crs_compatibility(info['gdf'], conn, table_name, info['input_geom_col'], args)
+            gdf = check_crs_compatibility(gdf, conn, table_name, input_geom_col, args)
             if gdf is None:
                 progress.advance(task)
                 continue  # Skip this file if CRS is incompatible or an error occurred
@@ -316,7 +310,7 @@ def process_files(args, conn, existing_tables):
             # Write to PostGIS
             try:
                 gdf.to_postgis(table_name, engine, if_exists='replace', index=False)
-                logger.info(f"Imported '{file}' to table '{table_name}'")
+                logger.info(f"[green]Imported '{file}' to table '{table_name}'.[/green]")
                 existing_tables.append(table_name)  # Add to existing_tables after successful import
             except Exception as e:
                 logger.error(f"[red]Error importing '{file}': {e}[/red]")
@@ -341,6 +335,7 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
 
     if not table_exists:
         # Table does not exist, proceed without CRS check
+        logger.info(f"[blue]Table '{table_name}' does not exist. Skipping CRS compatibility check.[/blue]")
         cursor.close()
         return gdf  # Proceed with the current GeoDataFrame
 
@@ -352,12 +347,12 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
         result = cursor.fetchone()
         if result:
             existing_srid = result[0]
-            logger.info(f"Existing SRID for '{table_name}' is {existing_srid}")
+            logger.info(f"[blue]Existing SRID for '{table_name}' is {existing_srid}.[/blue]")
         else:
-            logger.warning(f"No geometries found in '{table_name}' to determine SRID")
+            logger.warning(f"[yellow]No geometries found in '{table_name}' to determine SRID.[/yellow]")
             existing_srid = None
     except Exception as e:
-        logger.error(f"Error retrieving SRID for '{table_name}': {e}")
+        logger.error(f"[red]Error retrieving SRID for '{table_name}': {e}[/red]")
         conn.rollback()
         cursor.close()
         return None  # Skip this file due to error
@@ -365,39 +360,39 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
     # Get the SRID of the new data
     new_srid = gdf.crs.to_epsg()
     if new_srid is None:
-        logger.warning(f"No EPSG code found for the CRS of the new data for '{table_name}'")
+        logger.warning(f"[yellow]No EPSG code found for the CRS of the new data for '{table_name}'.[/yellow]")
         if args.overwrite:
             action = 'y'
         else:
-            action = console.input(f"Proceed without CRS check for '{table_name}'? (y/n): ")
+            action = console.input(f"[yellow]Proceed without CRS check for '{table_name}'? (y/n): [/yellow]")
         if action.lower() != 'y':
-            logger.info(f"Skipping '{table_name}' due to unknown CRS")
+            logger.info(f"[green]Skipping '{table_name}' due to unknown CRS.[/green]")
             cursor.close()
             return None  # Skip this file
     else:
-        logger.info(f"CRS of new data for '{table_name}' is EPSG:{new_srid}")
+        logger.info(f"[blue]CRS of new data for '{table_name}' is EPSG:{new_srid}.[/blue]")
 
     # Compare SRIDs
     if existing_srid and new_srid != existing_srid:
-        logger.warning(f"CRS mismatch for '{table_name}': Existing SRID {existing_srid}, New SRID {new_srid}")
+        logger.warning(f"[yellow]CRS mismatch for '{table_name}': Existing SRID {existing_srid}, New SRID {new_srid}[/yellow]")
         if args.overwrite:
             action = 'y'
         else:
-            action = console.input(f"Reproject new data to SRID {existing_srid}? (y/n): ")
+            action = console.input(f"[yellow]Reproject new data to SRID {existing_srid}? (y/n): [/yellow]")
         if action.lower() == 'y':
             try:
                 gdf = gdf.to_crs(epsg=existing_srid)
-                logger.info(f"Reprojected new data to SRID {existing_srid}")
+                logger.info(f"[green]Reprojected new data to SRID {existing_srid}.[/green]")
             except Exception as e:
                 logger.error(f"[red]Error reprojecting data for '{table_name}': {e}[/red]")
                 cursor.close()
                 return None  # Skip this file due to reprojection error
         else:
-            logger.info(f"Skipping '{table_name}' due to CRS mismatch")
+            logger.info(f"[green]Skipping '{table_name}' due to CRS mismatch.[/green]")
             cursor.close()
             return None  # Skip this file
     else:
-        logger.info(f"CRS is compatible for '{table_name}'")
+        logger.info(f"[blue]CRS is compatible for '{table_name}'.[/blue]")
 
     cursor.close()
     return gdf  # Return the (possibly reprojected) GeoDataFrame
@@ -423,7 +418,7 @@ def main():
     existing_tables = get_existing_tables(conn)
     process_files(args, conn, existing_tables)
     conn.close()
-    logger.info("All tasks completed ✓")
+    logger.info("[green]All tasks completed.[/green]")
 
 if __name__ == '__main__':
     main()

@@ -122,7 +122,7 @@ def create_spatial_index(conn, table_name, geom_column='geom'):
             USING GIST ("{geom_column}");
         """)
         conn.commit()
-        logging.info(f"Spatial index created on table '{table_name}'.")
+        logging.info(f"Spatial index '{index_name}' created on table '{table_name}'.")
     except Exception as e:
         logging.error(f"Error creating spatial index on '{table_name}': {e}")
         conn.rollback()
@@ -216,11 +216,10 @@ def process_files(args, conn, existing_tables):
             if args.rename_geom:
                 action = 'y'
             else:
-                action = console.input(f"Geometry column detected as '{geom_col}' for files {file_names}. Rename to 'geom'? (y/n): ")
+                action = console.input(f"[red]Geometry column detected as '{geom_col}' for files {file_names}. Rename to 'geom'? (y/n): [/red]")
             if action.lower() == 'y':
                 for info in file_info_list:
                     info['gdf'] = info['gdf'].rename_geometry('geom')
-                    info['input_geom_col'] = 'geom'  # Update the geometry column name
                     info['renamed'] = True
                 logger.info("Geometry columns renamed to 'geom'.")
             else:
@@ -236,12 +235,11 @@ def process_files(args, conn, existing_tables):
                 if args.rename_geom:
                     action = 'y'
                 else:
-                    action = console.input(f"Geometry column detected as '{geom_col}' for files {files}. Rename to 'geom'? (y/n): ")
+                    action = console.input(f"[red]Geometry column detected as '{geom_col}' for files {files}. Rename to 'geom'? (y/n): [/red]")
                 if action.lower() == 'y':
                     for info in file_info_list:
                         if info['input_geom_col'] == geom_col:
                             info['gdf'] = info['gdf'].rename_geometry('geom')
-                            info['input_geom_col'] = 'geom'  # Update the geometry column name
                             info['renamed'] = True
                     logger.info(f"Geometry columns renamed to 'geom' for files with '{geom_col}' column.")
                 else:
@@ -264,7 +262,6 @@ def process_files(args, conn, existing_tables):
         for info in file_info_list:
             file = info['file']
             table_name = info['table_name']
-            input_geom_col = info['input_geom_col']
             
             # Update logging messages
             logger.info(f"Processing {file}")
@@ -305,7 +302,7 @@ def process_files(args, conn, existing_tables):
                 else:
                     logger.info(f"Table '{table_name}' exists but no geometry column found. Skipping CRS compatibility check")
             else:
-                logger.info(f"Table '{table_name}' does not exist, skipping geometry/CRS checks.")
+                logger.info(f"Table '{table_name}': Skipping geometry/CRS checks")
 
             # CRS Compatibility Check
             gdf = check_crs_compatibility(info['gdf'], conn, table_name, info['input_geom_col'], args)
@@ -341,6 +338,7 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
 
     if not table_exists:
         # Table does not exist, proceed without CRS check
+        logger.info(f"Table '{table_name}': Skipping geometry/CRS checks")
         cursor.close()
         return gdf  # Proceed with the current GeoDataFrame
 

@@ -23,7 +23,9 @@ dependencies = [
     "sqlalchemy",
     "tqdm",
 ]
-dynamic = ["dependencies"]
 
 [project.scripts]
 dbfriend = "dbfriend.dbfriend:main"
+
+[tool.setuptools.packages.find]
+include = ["dbfriend"]
