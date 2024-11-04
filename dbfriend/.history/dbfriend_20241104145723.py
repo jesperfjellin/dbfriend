@@ -212,11 +212,10 @@ def process_files(args, conn, existing_tables):
         geom_col = next(iter(geom_col_files))
         if geom_col != 'geom':
             file_names = geom_col_files[geom_col]
-            formatted_files = '\n         '.join(file_names)  # Format files vertically
             if args.rename_geom:
                 action = 'y'
             else:
-                action = console.input(f"         Geometry column detected as '{geom_col}' for files:\n         {formatted_files}\n         Rename to 'geom'? (y/n): ")
+                action = console.input(f"         Geometry column detected as '{geom_col}' for files:\n         {file_names}.\n         Rename to 'geom'? (y/n): ")
             if action.lower() == 'y':
                 for info in file_info_list:
                     info['gdf'] = info['gdf'].rename_geometry('geom')
@@ -233,11 +232,10 @@ def process_files(args, conn, existing_tables):
         # Files have different geometry column names
         for geom_col, files in geom_col_files.items():
             if geom_col != 'geom':
-                formatted_files = '\n         '.join(files)  # Format files vertically
                 if args.rename_geom:
                     action = 'y'
                 else:
-                    action = console.input(f"         Geometry column detected as '{geom_col}' for files:\n         {formatted_files}\n         Rename to 'geom'? (y/n): ")
+                    action = console.input(f"         Geometry column detected as '{geom_col}' for files:\n         {file_names}.\n         Rename to 'geom'? (y/n): ")
                 if action.lower() == 'y':
                     for info in file_info_list:
                         if info['input_geom_col'] == geom_col:
