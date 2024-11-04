@@ -93,6 +93,33 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
 
     return parser.parse_args()
 
+def display_help():
+    help_message = """
+Usage:
+    dbfriend <username> <dbname> <filepath> [options]
+
+Positional Arguments:
+    <username>    Database user
+    <dbname>      Database name
+    <filepath>    Path to data files
+
+Options:
+    --overwrite       Overwrite existing tables without prompting.
+    --rename-geom     Automatically rename geometry columns to "geom" without prompting.
+    --log-level       Set the logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+    --host            Database host (default: localhost).
+    --port            Database port (default: 5432).
+    --epsg            Target EPSG code for the data. If not specified, will preserve source CRS or default to 4326.
+
+Examples:
+    dbfriend jesper mydatabase path/to/your/files --overwrite --rename-geom
+    dbfriend jesper mydatabase path/to/your/files --epsg 25832
+    dbfriend jesper mydatabase path/to/your/files --log-level DEBUG --host 192.168.1.100 --port 5433
+
+Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
+"""
+    console.print(help_message)
+
 def connect_db(dbname, dbuser, host, port, password):
     try:
         conn = psycopg2.connect(
@@ -772,6 +799,11 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
     return gdf  # Return the (possibly reprojected) GeoDataFrame
 
 def main():
+    # Check for help command first
+    if len(sys.argv) > 1 and sys.argv[1].lower() == 'help':
+        display_help()
+        sys.exit(0)
+
     args = parse_arguments()
 
     # Securely handle the password
