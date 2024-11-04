@@ -43,8 +43,8 @@ Options:
     --log-level       Set the logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     --host            Database host (default: localhost).
     --port            Database port (default: 5432).
-    --epsg            Target EPSG code for the data. If not specified, will preserve source CRS or
-                      default to 4326.
+    --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
+                      or default to 4326.
 
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 ```
