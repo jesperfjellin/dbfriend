@@ -419,6 +419,10 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
     if gdf is None or gdf.empty:
         return
 
+    if unique_id_column not in gdf.columns:
+        logger.error(f"Unique ID column '{unique_id_column}' not found in data")
+        return
+
     try:
         # Create temporary table for updates
         temp_table = f"temp_{table_name}"
@@ -427,21 +431,15 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
         # Update main table from temp table
         with engine.connect() as connection:
             from sqlalchemy import text
-            
-            # Get all columns except the unique ID
-            columns = [col for col in gdf.columns if col != unique_id_column]
-            update_cols = ", ".join([f"{col} = s.{col}" for col in columns])
-            
             sql = text(f"""
                 UPDATE "{table_name}" t
-                SET {update_cols}
+                SET geom = s.geom
                 FROM "{temp_table}" s
                 WHERE t.{unique_id_column} = s.{unique_id_column}
             """)
-            logger.debug(f"Executing update SQL: {sql}")
             connection.execute(sql)
             connection.execute(text(f'DROP TABLE IF EXISTS "{temp_table}"'))
-            connection.commit()
+            connection.commit()  # Add explicit commit
         
         logger.info(f"Successfully updated {len(gdf)} geometries in {table_name}")
     except Exception as e:

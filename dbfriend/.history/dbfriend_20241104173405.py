@@ -305,29 +305,36 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
     # Debug logging
     logger.debug(f"Common columns for comparison: {common_columns}")
     
-    # Get existing records from database
-    sql = f"""
-    SELECT 
-        MD5(ST_AsBinary({geom_column})) as geom_hash,
-        {', '.join(common_columns)}
-    FROM "{table_name}"
-    """
-    logger.debug(f"Executing SQL: {sql}")
+    # Fetch existing geometries with their attributes
+    if common_columns:
+        columns_sql = ', '.join(f'"{col}"' for col in common_columns)
+        cursor.execute(f"""
+            SELECT 
+                {columns_sql},
+                md5(ST_AsBinary("{geom_column}")) as geom_hash
+            FROM "{table_name}"
+            WHERE "{geom_column}" IS NOT NULL
+        """)
+    else:
+        # If no common columns, only fetch geom_hash
+        cursor.execute(f"""
+            SELECT 
+                md5(ST_AsBinary("{geom_column}")) as geom_hash
+            FROM "{table_name}"
+            WHERE "{geom_column}" IS NOT NULL
+        """)
     
-    existing_records = {}
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        rows = cur.fetchall()
-        logger.debug(f"Raw database results: {rows}")
-        
-        for row in rows:
-            geom_hash = row[0]
-            attrs = {col: row[i+1] for i, col in enumerate(common_columns)}
-            if geom_hash not in existing_records:
-                existing_records[geom_hash] = []
+    # Store existing records with their attributes
+    existing_records = {}  # geom_hash -> list of attribute dicts
+    column_names = [desc[0] for desc in cursor.description[:-1]]  # Exclude geom_hash
+    
+    for row in cursor.fetchall():
+        geom_hash = row[-1]
+        attrs = {col: val for col, val in zip(column_names, row[:-1])}
+        if geom_hash in existing_records:
             existing_records[geom_hash].append(attrs)
-            
-    logger.debug(f"Existing records from database: {existing_records}")
+        else:
+            existing_records[geom_hash] = [attrs]
     
     cursor.close()
     
@@ -342,63 +349,49 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
     updated_geometries = []
     identical_geometries = []
     
-    # Keep track of processed geometries to avoid duplicates
-    processed_geom_hashes = set()
-    
     for idx, row in comparison_gdf.iterrows():
         geom_hash = row['geom_hash']
         
-        if geom_hash in processed_geom_hashes:
-            logger.debug(f"Skipping duplicate geometry with hash {geom_hash}")
-            continue
-            
         if geom_hash not in existing_records:
-            logger.debug(f"New geometry found with hash {geom_hash}")
             new_geometries.append(row)
-            processed_geom_hashes.add(geom_hash)
             continue
         
         # Compare attributes with all existing records having the same geom_hash
         if common_columns:
             current_attrs = {col: row[col] for col in common_columns}
-            
-            # Debug current record
-            logger.debug(f"\nChecking record with hash {geom_hash}:")
-            logger.debug(f"Current attributes: {current_attrs}")
-            logger.debug(f"Existing records for this hash: {existing_records[geom_hash]}")
-            
-            # Check if this exact record already exists
             found_match = False
+            
+            # First check if this exact record already exists
             for existing_attrs in existing_records[geom_hash]:
-                # Compare each attribute
-                all_match = True
-                for col in common_columns:
-                    current_val = str(current_attrs.get(col, '')).strip()
-                    existing_val = str(existing_attrs.get(col, '')).strip()
-                    if current_val != existing_val:
-                        logger.debug(f"Mismatch in column {col}: current='{current_val}' existing='{existing_val}'")
-                        all_match = False
-                        break
+                attrs_match = all(
+                    (pd.isna(existing_attrs.get(col)) and pd.isna(current_attrs.get(col))) or
+                    (str(existing_attrs.get(col)).strip() == str(current_attrs.get(col)).strip())
+                    for col in common_columns
+                )
                 
-                if all_match:
-                    logger.debug("Found exact attribute match - marking as identical")
+                if attrs_match:
                     identical_geometries.append(row)
                     found_match = True
                     break
             
+            # Only mark as updated if we didn't find an exact match
             if not found_match:
-                logger.debug("No exact match found - marking as updated")
-                updated_geometries.append(row)
-            
-            processed_geom_hashes.add(geom_hash)
+                # Check if this is actually a new combination of attributes
+                new_combination = True
+                for existing_attrs in existing_records[geom_hash]:
+                    if all(
+                        str(existing_attrs.get(col)).strip() == str(current_attrs.get(col)).strip()
+                        for col in common_columns
+                    ):
+                        new_combination = False
+                        break
+                
+                if new_combination:
+                    new_geometries.append(row)
+                else:
+                    updated_geometries.append(row)
         else:
             identical_geometries.append(row)
-            processed_geom_hashes.add(geom_hash)
-
-    logger.debug(f"Processed geometry hashes: {processed_geom_hashes}")
-    logger.debug(f"New geometries: {len(new_geometries)}")
-    logger.debug(f"Updated geometries: {len(updated_geometries)}")
-    logger.debug(f"Identical geometries: {len(identical_geometries)}")
     
     # Convert lists to GeoDataFrames
     new_gdf = GeoDataFrame(new_geometries, geometry=geom_column, crs=gdf.crs) if new_geometries else GeoDataFrame(columns=gdf.columns)
@@ -419,6 +412,10 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
     if gdf is None or gdf.empty:
         return
 
+    if unique_id_column not in gdf.columns:
+        logger.error(f"Unique ID column '{unique_id_column}' not found in data")
+        return
+
     try:
         # Create temporary table for updates
         temp_table = f"temp_{table_name}"
@@ -427,21 +424,14 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
         # Update main table from temp table
         with engine.connect() as connection:
             from sqlalchemy import text
-            
-            # Get all columns except the unique ID
-            columns = [col for col in gdf.columns if col != unique_id_column]
-            update_cols = ", ".join([f"{col} = s.{col}" for col in columns])
-            
             sql = text(f"""
                 UPDATE "{table_name}" t
-                SET {update_cols}
+                SET geom = s.geom
                 FROM "{temp_table}" s
                 WHERE t.{unique_id_column} = s.{unique_id_column}
             """)
-            logger.debug(f"Executing update SQL: {sql}")
             connection.execute(sql)
             connection.execute(text(f'DROP TABLE IF EXISTS "{temp_table}"'))
-            connection.commit()
         
         logger.info(f"Successfully updated {len(gdf)} geometries in {table_name}")
     except Exception as e:

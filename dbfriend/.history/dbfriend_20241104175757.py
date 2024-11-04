@@ -430,7 +430,7 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
             
             # Get all columns except the unique ID
             columns = [col for col in gdf.columns if col != unique_id_column]
-            update_cols = ", ".join([f"{col} = s.{col}" for col in columns])
+            update_cols = ", ".join([f"t.{col} = s.{col}" for col in columns])
             
             sql = text(f"""
                 UPDATE "{table_name}" t
