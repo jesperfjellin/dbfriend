@@ -176,10 +176,6 @@ def check_table_exists(conn, table_name):
     cursor.close()
     return exists
 
-def compute_geom_hash(geometry):
-    wkb = geometry.wkb
-    return hashlib.md5(wkb).hexdigest()
-
 def compare_geometries(gdf, conn, table_name, geom_column='geom'):
     """
     Compare geometries between incoming GeoDataFrame and existing PostGIS table.
@@ -193,34 +189,38 @@ def compare_geometries(gdf, conn, table_name, geom_column='geom'):
     gdf_columns = set(gdf.columns)
     common_columns = list(db_columns.intersection(gdf_columns))
     
-    # Fetch existing geometries with their attributes and compute their hashes
+    # Fetch existing geometries with their attributes
     columns_sql = ', '.join(f'"{col}"' for col in common_columns)
     cursor.execute(f"""
         SELECT 
             {columns_sql},
-            md5(ST_AsBinary("{geom_column}")) as geom_hash
+            ST_AsText("{geom_column}") as geom_wkt
         FROM "{table_name}"
     """)
     
-    # Create a set of existing geometry hashes for faster lookup
-    existing_geom_hashes = set()
-    column_names = [desc[0] for desc in cursor.description[:-1]]  # Exclude geom_hash
+    # Create a set of existing WKT geometries for faster lookup
+    existing_geoms = set()
+    column_names = [desc[0] for desc in cursor.description[:-1]]  # Exclude geom_wkt
     
     for row in cursor.fetchall():
-        existing_geom_hashes.add(row[-1])  # Add geom_hash to set
+        existing_geoms.add(row[-1])  # Add WKT to set
     
-    # Compute hashes for new geometries
-    gdf['geom_hash'] = gdf[geom_column].apply(compute_geom_hash)
+    # Compare with new geometries
+    new_geometries = []
+    identical_geometries = []
     
-    # Compare with existing geometries
-    new_geometries = gdf[~gdf['geom_hash'].isin(existing_geom_hashes)]
-    identical_geometries = gdf[gdf['geom_hash'].isin(existing_geom_hashes)]
+    for idx, row in gdf.iterrows():
+        wkt = row[geom_column].wkt
+        if wkt not in existing_geoms:
+            new_geometries.append(row)
+        else:
+            identical_geometries.append(row)
     
     cursor.close()
     return (
-        new_geometries.drop(columns='geom_hash') if not new_geometries.empty else None,
+        GeoDataFrame(new_geometries, geometry=geom_column, crs="EPSG:4326") if new_geometries else None,
         None,  # We're not tracking updates for now
-        identical_geometries.drop(columns='geom_hash') if not identical_geometries.empty else None
+        GeoDataFrame(identical_geometries, geometry=geom_column, crs="EPSG:4326") if identical_geometries else None
     )
 
 def process_files(args, conn, existing_tables):

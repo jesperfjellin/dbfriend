@@ -176,15 +176,12 @@ def check_table_exists(conn, table_name):
     cursor.close()
     return exists
 
-def compute_geom_hash(geometry):
-    wkb = geometry.wkb
-    return hashlib.md5(wkb).hexdigest()
-
 def compare_geometries(gdf, conn, table_name, geom_column='geom'):
     """
     Compare geometries between incoming GeoDataFrame and existing PostGIS table.
     Returns a tuple of (new_geometries, updated_geometries, identical_geometries)
     """
+    # Get existing geometries from PostGIS
     cursor = conn.cursor()
     
     # First, get the columns that exist in both datasets
@@ -193,34 +190,45 @@ def compare_geometries(gdf, conn, table_name, geom_column='geom'):
     gdf_columns = set(gdf.columns)
     common_columns = list(db_columns.intersection(gdf_columns))
     
-    # Fetch existing geometries with their attributes and compute their hashes
+    # Fetch existing geometries with their attributes
     columns_sql = ', '.join(f'"{col}"' for col in common_columns)
     cursor.execute(f"""
         SELECT 
             {columns_sql},
-            md5(ST_AsBinary("{geom_column}")) as geom_hash
-        FROM "{table_name}"
+            ST_AsText("{geom_column}") as geom_wkt,
+            MD5(CAST(row_to_json(t) AS TEXT)) as row_hash
+        FROM (SELECT * FROM "{table_name}") t
     """)
     
-    # Create a set of existing geometry hashes for faster lookup
-    existing_geom_hashes = set()
-    column_names = [desc[0] for desc in cursor.description[:-1]]  # Exclude geom_hash
-    
+    existing_records = {}
     for row in cursor.fetchall():
-        existing_geom_hashes.add(row[-1])  # Add geom_hash to set
+        # Create a hash of the geometry and attributes
+        existing_records[row[-2]] = row[-1]  # WKT -> hash mapping
     
-    # Compute hashes for new geometries
-    gdf['geom_hash'] = gdf[geom_column].apply(compute_geom_hash)
+    # Compare with new geometries
+    new_geometries = []
+    updated_geometries = []
+    identical_geometries = []
     
-    # Compare with existing geometries
-    new_geometries = gdf[~gdf['geom_hash'].isin(existing_geom_hashes)]
-    identical_geometries = gdf[gdf['geom_hash'].isin(existing_geom_hashes)]
+    for idx, row in gdf.iterrows():
+        wkt = row[geom_column].wkt
+        # Create a comparable hash of the new record
+        row_dict = row[common_columns].to_dict()
+        row_dict[geom_column] = wkt
+        new_hash = hashlib.md5(json.dumps(row_dict, sort_keys=True).encode()).hexdigest()
+        
+        if wkt not in existing_records:
+            new_geometries.append(row)
+        elif existing_records[wkt] != new_hash:
+            updated_geometries.append(row)
+        else:
+            identical_geometries.append(row)
     
     cursor.close()
     return (
-        new_geometries.drop(columns='geom_hash') if not new_geometries.empty else None,
-        None,  # We're not tracking updates for now
-        identical_geometries.drop(columns='geom_hash') if not identical_geometries.empty else None
+        GeoDataFrame(new_geometries, geometry=geom_column, crs="EPSG:4326") if new_geometries else None,
+        GeoDataFrame(updated_geometries, geometry=geom_column, crs="EPSG:4326") if updated_geometries else None,
+        GeoDataFrame(identical_geometries, geometry=geom_column, crs="EPSG:4326") if identical_geometries else None
     )
 
 def process_files(args, conn, existing_tables):
