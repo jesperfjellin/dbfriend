@@ -1,7 +1,7 @@
 
 
 <div align="center">
-  <img src="./images/Ütqr-wts.png" alt="Project Logo" width="400"/>
+  <img src="./images/Utqr-wts.png" alt="Project Logo" width="400"/>
 </div>
 
 <div align="center">
