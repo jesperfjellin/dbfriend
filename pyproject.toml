@@ -23,7 +23,6 @@ dependencies = [
     "sqlalchemy",
     "tqdm",
     "rich",
-    "colorama",
     "pandas"
 ]
 
