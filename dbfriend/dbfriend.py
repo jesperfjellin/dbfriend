@@ -216,7 +216,7 @@ def process_files(args, conn, existing_tables):
             if args.rename_geom:
                 action = 'y'
             else:
-                action = console.input(f"Geometry column detected as '{geom_col}' for files {file_names}. Rename to 'geom'? (y/n): ")
+                action = console.input(f"         Geometry column detected as '{geom_col}' for files:\n         {file_names}.\n         Rename to 'geom'? (y/n): ")
             if action.lower() == 'y':
                 for info in file_info_list:
                     info['gdf'] = info['gdf'].rename_geometry('geom')
@@ -236,7 +236,7 @@ def process_files(args, conn, existing_tables):
                 if args.rename_geom:
                     action = 'y'
                 else:
-                    action = console.input(f"Geometry column detected as '{geom_col}' for files {files}. Rename to 'geom'? (y/n): ")
+                    action = console.input(f"         Geometry column detected as '{geom_col}' for files:\n         {file_names}.\n         Rename to 'geom'? (y/n): ")
                 if action.lower() == 'y':
                     for info in file_info_list:
                         if info['input_geom_col'] == geom_col:
@@ -259,7 +259,7 @@ def process_files(args, conn, existing_tables):
         console=console,
         expand=False  # Prevents the progress bar from expanding to full width
     ) as progress:
-        task = progress.add_task("Processing files", total=len(file_info_list))
+        task = progress.add_task("       Processing files", total=len(file_info_list))
         
         for info in file_info_list:
             file = info['file']
