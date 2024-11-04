@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import geopandas as gpd
 import psycopg2
 from sqlalchemy import create_engine
 import logging
@@ -13,9 +14,11 @@ import pandas as pd
 import geopandas as gpd
 from geopandas import GeoDataFrame
 from collections import defaultdict
+from pathlib
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from colorama
 
 # Initialize rich Console
 console = Console(width=100)

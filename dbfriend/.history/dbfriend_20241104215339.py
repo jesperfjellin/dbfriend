@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import geopandas as gpd
 import psycopg2
 from sqlalchemy import create_engine
 import logging
@@ -16,6 +17,7 @@ from collections import defaultdict
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from colorama import Fore, Style
 
 # Initialize rich Console
 console = Console(width=100)

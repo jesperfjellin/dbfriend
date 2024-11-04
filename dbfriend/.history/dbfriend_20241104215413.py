@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import geopandas as gpd
 import psycopg2
 from sqlalchemy import create_engine
 import logging
