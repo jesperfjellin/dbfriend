@@ -64,7 +64,6 @@ def parse_arguments():
 def display_help():
     help_message = """
 Usage:
-    dbfriend help
     dbfriend <username> <dbname> <filepath> <password> [options]
 
 Positional Arguments:
