@@ -56,7 +56,7 @@ Options:
     --port            Database port (default: 5432).
     --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
                       or default to 4326.
-    --schema          Specify the database schema that the data will be queried from.
+    --schema          Specify the database schema that the data will be queried from and written to.
     
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
