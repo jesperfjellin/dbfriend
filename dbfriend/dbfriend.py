@@ -48,12 +48,13 @@ def print_geometry_details(row, status="", coordinates_enabled=False):
         logger.warning(f"No geometry column found in row: {row}")
         return
         
-    attrs = row.drop(['geometry', 'geom'] if 'geometry' in row else ['geom'])
+    attrs = row.drop(['geometry', 'geom'] if 'geometry' in row else ['geom']).to_dict()
+    attrs_str = ", ".join(f"{k}: {v}" for k, v in attrs.items())
     
     # Prepare output text
     output_lines = [
         f"\n{status} Geometry Details:",
-        f"Attributes: {attrs}"
+        f"Attributes: {attrs_str}"
     ]
     
     if geom.geom_type == 'Point':
@@ -61,12 +62,21 @@ def print_geometry_details(row, status="", coordinates_enabled=False):
     else:
         if hasattr(geom, 'exterior'):
             coords = list(geom.exterior.coords)
-            output_lines.append(f"Exterior Coordinates: {coords}")
+            output_lines.append("Coordinates:")
+            # Format each coordinate pair individually
+            for x, y in coords:
+                output_lines.append(f"({x:.6f}, {y:.6f})")
+            
             if geom.interiors:
                 for i, interior in enumerate(geom.interiors):
-                    output_lines.append(f"Interior Ring {i+1} Coordinates: {list(interior.coords)}")
+                    output_lines.append(f"Interior Ring {i+1} Coordinates:")
+                    for x, y in interior.coords:
+                        output_lines.append(f"({x:.6f}, {y:.6f})")
         else:
-            output_lines.append(f"Coordinates: {list(geom.coords)}")
+            coords = list(geom.coords)
+            output_lines.append("Coordinates:")
+            for x, y in coords:
+                output_lines.append(f"({x:.6f}, {y:.6f})")
     
     # Output to terminal
     for line in output_lines:
@@ -96,7 +106,7 @@ Options:
     --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
                       or default to 4326.
     --schema          Specify the database schema that the data will be queried from and written to.
-    --coordinates     Print coordinates and attributes for each geometry
+    --coordinates     Print coordinates and attributes for each geometry.
     
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
