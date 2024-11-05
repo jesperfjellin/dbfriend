@@ -54,10 +54,13 @@ Options:
     --log-level       Set the logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     --host            Database host (default: localhost).
     --port            Database port (default: 5432).
-    --epsg            Target EPSG code for the data. If not specified, will preserve source CRS or default to 4326.
-
+    --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
+                      or default to 4326.
+    --schema          Specify the database schema that the data will be queried from.
+    
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
+
     # If --help is passed, print help and exit
     if '--help' in sys.argv:
         console.print(help_text)
@@ -87,6 +90,8 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
                        help='Database port (default: 5432)')
     parser.add_argument('--epsg', type=int,
                        help='Target EPSG code for the data. If not specified, will preserve source CRS or default to 4326')
+    parser.add_argument('--schema', 
+                       help='Specify the database schema')
 
     return parser.parse_args()
 
@@ -105,41 +110,41 @@ def connect_db(dbname, dbuser, host, port, password):
         logger.error(f"Database connection failed: {e}")
         sys.exit(1)
 
-def get_existing_tables(conn):
+def get_existing_tables(conn, schema='public'):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT table_name
         FROM information_schema.tables
-        WHERE table_schema = 'public';
-    """)
+        WHERE table_schema = %s;
+    """, (schema,))
     tables = [row[0] for row in cursor.fetchall()]
     cursor.close()
     return tables
 
-def create_spatial_index(conn, table_name, geom_column='geom'):
+def create_spatial_index(conn, table_name, schema='public', geom_column='geom'):
     cursor = conn.cursor()
-    index_name = f"{table_name}_{geom_column}_idx"
+    index_name = f"{schema}_{table_name}_{geom_column}_idx"
     try:
         cursor.execute(f"""
             CREATE INDEX IF NOT EXISTS "{index_name}"
-            ON "{table_name}"
+            ON "{schema}"."{table_name}"
             USING GIST ("{geom_column}");
         """)
         conn.commit()
-        logging.info(f"Spatial index created on table '{table_name}'.")
+        logger.info(f"Spatial index created on table '{schema}.{table_name}'")
     except Exception as e:
-        logging.error(f"Error creating spatial index on '{table_name}': {e}")
+        logger.error(f"Error creating spatial index on '{schema}.{table_name}': {e}")
         conn.rollback()
     finally:
         cursor.close()
 
-def get_db_geometry_column(conn, table_name):
+def get_db_geometry_column(conn, table_name, schema='public'):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT f_geometry_column
         FROM geometry_columns
-        WHERE f_table_schema = 'public' AND f_table_name = %s;
-    """, (table_name,))
+        WHERE f_table_schema = %s AND f_table_name = %s;
+    """, (schema, table_name))
     result = cursor.fetchone()
     cursor.close()
     if result:
@@ -150,8 +155,8 @@ def get_db_geometry_column(conn, table_name):
         cursor.execute("""
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s AND udt_name = 'geometry';
-        """, (table_name,))
+            WHERE table_schema = %s AND table_name = %s AND udt_name = 'geometry';
+        """, (schema, table_name))
         result = cursor.fetchone()
         cursor.close()
         if result:
@@ -159,15 +164,15 @@ def get_db_geometry_column(conn, table_name):
         else:
             return None
 
-def check_table_exists(conn, table_name):
+def check_table_exists(conn, table_name, schema='public'):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT EXISTS (
             SELECT 1
             FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = %s
+            WHERE table_schema = %s AND table_name = %s
         );
-    """, (table_name,))
+    """, (schema, table_name))
     exists = cursor.fetchone()[0]
     cursor.close()
     return exists
@@ -477,8 +482,17 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
         logger.error(f"Error updating geometries: {e}")
 
 def process_files(args, conn, existing_tables):
-    engine = create_engine(f'postgresql://{args.dbuser}:{args.password}@{args.host}:{args.port}/{args.dbname}')
-    
+    # Modify the engine creation to include schema if specified
+    if args.schema:
+        engine = create_engine(
+            f'postgresql://{args.dbuser}:{args.password}@{args.host}:{args.port}/{args.dbname}',
+            connect_args={'options': f'-c search_path={args.schema},public'}
+        )
+        schema = args.schema
+    else:
+        engine = create_engine(f'postgresql://{args.dbuser}:{args.password}@{args.host}:{args.port}/{args.dbname}')
+        schema = 'public'
+
     total_new = 0
     total_updated = 0
     total_identical = 0
@@ -622,67 +636,107 @@ def process_files(args, conn, existing_tables):
             
             logger.info(f"Processing {file}")
             
-            if table_name in existing_tables:
-                logger.info(f"Table {table_name} exists, analyzing differences...")
-                
-                new_geoms, updated_geoms, identical_geoms = compare_geometries(
-                    gdf, conn, table_name, input_geom_col, exclude_columns=exclude_cols
-                )
-                
-                # Create summary of differences
-                num_new = len(new_geoms) if new_geoms is not None else 0
-                num_updated = len(updated_geoms) if updated_geoms is not None else 0
-                num_identical = len(identical_geoms) if identical_geoms is not None else 0
-                
-                total_new += num_new
-                total_updated += num_updated
-                total_identical += num_identical
-                
-                logger.info("Found [green]" + str(num_new) + " new[/] geometries, "
-                           "[yellow]" + str(num_updated) + " updated[/] geometries, and "
-                           "[blue]" + str(num_identical) + " identical[/] geometries. "
-                           "Skipping identical geometries...")
-                
-                # Detailed logging for updated geometries
-                if num_updated > 0:
-                    logger.debug("Updated geometries details:")
-                    for idx, row in updated_geoms.iterrows():
-                        logger.debug(f"Updated Geometry: {row.to_dict()}")
-                
-                # Detailed logging for identical geometries
-                if num_identical > 0:
-                    logger.debug("Identical geometries details:")
-                    for idx, row in identical_geoms.iterrows():
-                        logger.debug(f"Identical Geometry: {row.to_dict()}")
-                
-                # Handle new geometries
-                if num_new > 0:
-                    try:
-                        new_geoms.to_postgis(table_name, engine, if_exists='append', index=False)
-                        logger.info(f"Successfully appended {num_new} new geometries to {table_name}")
-                    except Exception as e:
-                        logger.error(f"Error appending new geometries: {e}")
-                else:
-                    #logger.info(f"No new geometries to append to {table_name}")
-                    pass
-                
-                # Handle updated geometries (if implemented)
-                if num_updated > 0:
-                    update_geometries(updated_geoms, table_name, engine, unique_id_column='osm_id')  # Adjust unique_id_column as needed
-                
-            else:
-                # For new tables
+            try:
+                # Use schema-qualified table name for to_postgis
+                qualified_table = f"{schema}.{table_name}"
                 num_geometries = len(gdf)
-                logger.info(f"Found {num_geometries} new geometries to import into new table '{table_name}'")
                 
-                try:
-                    gdf.to_postgis(table_name, engine, if_exists='replace', index=False)
-                    logger.info(f"Successfully imported {num_geometries} geometries to new table '{table_name}'")
-                    create_spatial_index(conn, table_name, geom_column=input_geom_col)
-                    existing_tables.append(table_name)
-                    total_new += num_geometries  # Add this line to track new table imports
-                except Exception as e:
-                    logger.error(f"[red]Error importing '{file}': {e}[/red]")
+                if table_name in existing_tables:
+                    logger.info(f"Table {table_name} exists, analyzing differences...")
+                    
+                    new_geoms, updated_geoms, identical_geoms = compare_geometries(
+                        gdf, conn, table_name, input_geom_col, exclude_columns=exclude_cols
+                    )
+                    
+                    # Create summary of differences
+                    num_new = len(new_geoms) if new_geoms is not None else 0
+                    num_updated = len(updated_geoms) if updated_geoms is not None else 0
+                    num_identical = len(identical_geoms) if identical_geoms is not None else 0
+                    
+                    total_new += num_new
+                    total_updated += num_updated
+                    total_identical += num_identical
+                    
+                    logger.info("Found [green]" + str(num_new) + " new[/] geometries, "
+                               "[yellow]" + str(num_updated) + " updated[/] geometries, and "
+                               "[blue]" + str(num_identical) + " identical[/] geometries. "
+                               "Skipping identical geometries...")
+                    
+                    # Detailed logging for updated geometries
+                    if num_updated > 0:
+                        logger.debug("Updated geometries details:")
+                        for idx, row in updated_geoms.iterrows():
+                            logger.debug(f"Updated Geometry: {row.to_dict()}")
+                    
+                    # Detailed logging for identical geometries
+                    if num_identical > 0:
+                        logger.debug("Identical geometries details:")
+                        for idx, row in identical_geoms.iterrows():
+                            logger.debug(f"Identical Geometry: {row.to_dict()}")
+                    
+                    # Handle new geometries
+                    if num_new > 0:
+                        try:
+                            # Use schema-qualified table name
+                            qualified_table = f"{schema}.{table_name}"
+                            new_geoms.to_postgis(
+                                qualified_table, 
+                                engine, 
+                                if_exists='append', 
+                                index=False
+                            )
+                            logger.info(f"Successfully appended {num_new} new geometries to {qualified_table}")
+                        except Exception as e:
+                            logger.error(f"Error appending new geometries: {e}")
+                    else:
+                        #logger.info(f"No new geometries to append to {table_name}")
+                        pass
+                    
+                    # Handle updated geometries (if implemented)
+                    if num_updated > 0:
+                        update_geometries(updated_geoms, table_name, engine, unique_id_column='osm_id')  # Adjust unique_id_column as needed
+                    
+                else:
+                    logger.info(f"Found {num_geometries} new geometries to import into new table '{qualified_table}'")
+                    
+                    try:
+                        # Write to PostGIS with schema
+                        gdf.to_postgis(
+                            name=table_name,  # Use unqualified name
+                            con=engine,
+                            schema=schema,    # Specify schema separately
+                            if_exists='replace',
+                            index=False
+                        )
+                        
+                        # Verify the table was created
+                        cursor = conn.cursor()
+                        cursor.execute(f"""
+                            SELECT EXISTS (
+                                SELECT 1 
+                                FROM information_schema.tables 
+                                WHERE table_schema = %s 
+                                AND table_name = %s
+                            );
+                        """, (schema, table_name))
+                        table_exists = cursor.fetchone()[0]
+                        cursor.close()
+                        
+                        if table_exists:
+                            logger.info(f"Successfully imported {num_geometries} geometries to new table '{qualified_table}'")
+                            create_spatial_index(conn, table_name, schema=schema, geom_column='geom')
+                            existing_tables.append(table_name)
+                            total_new += num_geometries
+                        else:
+                            logger.error(f"Failed to create table '{qualified_table}'")
+                            
+                    except Exception as e:
+                        logger.error(f"Error importing '{file}': {e}")
+                        continue
+                    
+            except Exception as e:
+                logger.error(f"Error processing '{file}': {e}")
+                continue
             
             progress.advance(task)
 
@@ -768,6 +822,35 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
     cursor.close()
     return gdf  # Return the (possibly reprojected) GeoDataFrame
 
+def check_schema_exists(conn, schema_name: str) -> bool:
+    """Check if the specified schema exists."""
+    cursor = conn.cursor()
+    
+    # Debug: List all available schemas
+    cursor.execute("""
+        SELECT schema_name 
+        FROM information_schema.schemata;
+    """)
+    all_schemas = [row[0] for row in cursor.fetchall()]
+    logger.debug(f"Available schemas: {all_schemas}")
+    
+    # Check for specific schema
+    cursor.execute("""
+        SELECT EXISTS(
+            SELECT 1 
+            FROM information_schema.schemata 
+            WHERE schema_name = %s
+        );
+    """, (schema_name.lower(),))
+    exists = cursor.fetchone()[0]
+    
+    logger.debug(f"Schema check for '{schema_name}': {exists}")
+    logger.debug(f"Current user: {conn.info.user}")
+    logger.debug(f"Current database: {conn.info.dbname}")
+    
+    cursor.close()
+    return exists
+
 def main():
     args = parse_arguments()
 
@@ -786,8 +869,16 @@ def main():
         sys.exit(1)
     logger.setLevel(numeric_level)
 
+    # Verify schema exists if specified
     conn = connect_db(args.dbname, args.dbuser, args.host, args.port, args.password)
-    existing_tables = get_existing_tables(conn)
+    if args.schema:
+        if not check_schema_exists(conn, args.schema):
+            logger.error(f"[red]Schema '{args.schema}' does not exist. Please create it first.[/red]")
+            sys.exit(1)
+        logger.info(f"Using schema '{args.schema}'")
+    
+    # Continue with normal operation
+    existing_tables = get_existing_tables(conn, schema=args.schema or 'public')
     process_files(args, conn, existing_tables)
     conn.close()
 
