@@ -679,9 +679,9 @@ def process_files(args, conn, existing_tables):
                     total_updated += num_updated
                     total_identical += num_identical
                     
-                    logger.info(f"Found {num_new:,} [green]new[/] geometries, "
-                               f"{num_updated:,}[yellow] updated[/] geometries, and "
-                               f"{num_identical:,} [red]identical[/] geometries skipped. "
+                    logger.info(f"Found {format(num_new, ',')} [green]new[/] geometries, "
+                               f"{format(num_updated, ',')}[yellow] updated[/] geometries, and "
+                               f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped. "
                                "Skipping identical geometries...")
                     
                     # Detailed logging for updated geometries
@@ -772,9 +772,9 @@ def process_files(args, conn, existing_tables):
     # After the progress bar completes, show the summary
     logger.info("All tasks completed ✓")
     logger.info("Summary of tasks:\n"
-               f"[green]{total_new:,}[/] new geometries added, "
-               f"[yellow]{total_updated:,}[/] updated geometries, "
-               f"{total_identical:,} [red]identical[/] geometries skipped")
+               f"[green]{format(num_new, ',').replace(',', ' ')}[/] new geometries added, "
+               f"[yellow]{format(num_updated, ',').replace(',', ' ')}[/] updated geometries, "
+               f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped")
 
 def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
     cursor = conn.cursor()
