@@ -51,13 +51,13 @@ Positional Arguments:
 Options:
     --help            Show this help message and exit
     --overwrite       Overwrite existing tables without prompting.
-    --rename-geom     Automatically rename geometry columns to "geom" without prompting.
     --log-level       Set the logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     --host            Database host (default: localhost).
     --port            Database port (default: 5432).
     --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
                       or default to 4326.
     --schema          Specify the database schema that the data will be queried from and written to.
+    --coordinates     Print coordinates and attributes for each geometry.
 
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 ```
