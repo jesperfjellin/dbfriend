@@ -99,7 +99,6 @@ Positional Arguments:
 Options:
     --help            Show this help message and exit
     --overwrite       Overwrite existing tables without prompting.
-    --rename-geom     Automatically rename geometry columns to "geom" without prompting.
     --log-level       Set the logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     --host            Database host (default: localhost).
     --port            Database port (default: 5432).
@@ -129,8 +128,6 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
                        help='Show this help message and exit')
     parser.add_argument('--overwrite', action='store_true', 
                        help='Overwrite existing tables without prompting')
-    parser.add_argument('--rename-geom', action='store_true', 
-                       help='Automatically rename geometry columns to "geom" without prompting')
     parser.add_argument('--log-level', default='INFO', 
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
                        help='Set the logging verbosity')
@@ -175,12 +172,15 @@ def get_existing_tables(conn, schema='public'):
 
 def create_spatial_index(conn, table_name, schema='public', geom_column='geom'):
     cursor = conn.cursor()
-    index_name = f"{schema}_{table_name}_{geom_column}_idx"
+    # Get the actual geometry column name
+    actual_geom_column = get_db_geometry_column(conn, table_name, schema=schema) or geom_column
+    index_name = f"{schema}_{table_name}_{actual_geom_column}_idx"
+    
     try:
         cursor.execute(f"""
             CREATE INDEX IF NOT EXISTS "{index_name}"
             ON "{schema}"."{table_name}"
-            USING GIST ("{geom_column}");
+            USING GIST ("{actual_geom_column}");
         """)
         conn.commit()
         logger.info(f"Spatial index created on table '{schema}.{table_name}'")
@@ -335,37 +335,23 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
     """
     cursor = conn.cursor()
     
-    # Get columns from the database table, preserving case
-    cursor.execute(f"""
-        SELECT column_name 
-        FROM information_schema.columns 
-        WHERE table_schema = 'public'
-          AND table_name   = '{table_name}'
-    """)
-    db_columns = set(row[0] for row in cursor.fetchall())
+    # Get the actual geometry column name from the database
+    db_geom_column = get_db_geometry_column(conn, table_name, schema='public')
+    if not db_geom_column:
+        logger.error(f"No geometry column found in table '{table_name}'")
+        return None, None, None
+        
+    # Get common columns between GDF and database table
+    common_columns = [col for col in gdf.columns if col != geom_column]
+    if exclude_columns:
+        common_columns = [col for col in common_columns if col not in exclude_columns]
     
-    # Get columns from the GeoDataFrame
-    gdf_columns = set(gdf.columns)
-    
-    # Check for new columns (excluding geometry and excluded columns)
-    new_columns = gdf_columns - db_columns - {geom_column} - set(exclude_columns or [])
-    if new_columns:
-        logger.debug(f"New columns detected: {new_columns}")
-        # If there are new columns, treat all records as updates
-        return None, gdf, None
-    
-    # Determine common columns, excluding the geometry column and any excluded columns
-    common_columns = list(db_columns.intersection(gdf_columns) - {geom_column} - set(exclude_columns))
-    
-    # Debug logging
-    logger.debug(f"Common columns for comparison: {common_columns}")
-    
-    # Get existing records from database, using exact column names
+    # Use the database geometry column name for the SQL query
     if common_columns:
         quoted_columns = ', '.join(f'"{col}"' for col in common_columns)
-        columns_sql = f"MD5(ST_AsBinary({geom_column})) as geom_hash, {quoted_columns}"
+        columns_sql = f"MD5(ST_AsBinary({db_geom_column})) as geom_hash, {quoted_columns}"
     else:
-        columns_sql = f"MD5(ST_AsBinary({geom_column})) as geom_hash"
+        columns_sql = f"MD5(ST_AsBinary({db_geom_column})) as geom_hash"
     
     sql = f"""
     SELECT {columns_sql}
@@ -614,56 +600,14 @@ def process_files(args, conn, existing_tables):
         geom_col_files[info['input_geom_col']].append(info['file'])
 
     # Handle geometry column renaming
-    if len(geom_col_files) == 1:
-        # All files have the same geometry column name
-        geom_col = next(iter(geom_col_files))
-        if geom_col != 'geom':
-            file_names = geom_col_files[geom_col]
-            formatted_files = '\n         '.join(file_names)  # Format files vertically
-            if args.rename_geom:
-                action = 'y'
-            else:
-                action = input(f"         Geometry column detected as '{geom_col}' for files:\n         {formatted_files}\n         Rename to 'geom'? (y/n): ")
-            if action.lower() == 'y':
-                for info in file_info_list:
-                    gdf = info['gdf']
-                    gdf = gdf.rename_geometry('geom')
-                    gdf.set_geometry('geom', inplace=True)  # Add this line
-                    gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
-                    info['gdf'] = gdf  # Update the GeoDataFrame in info
-                    info['input_geom_col'] = 'geom'
-                    info['renamed'] = True
-                logger.info("Geometry columns renamed to 'geom'.")
-            else:
-                for info in file_info_list:
-                    info['renamed'] = False
-        else:
-            for info in file_info_list:
-                info['renamed'] = False
-    else:
-        # Files have different geometry column names
-        for geom_col, files in geom_col_files.items():
-            if geom_col != 'geom':
-                formatted_files = '\n         '.join(files)  # Format files vertically
-                if args.rename_geom:
-                    action = 'y'
-                else:
-                    action = input(f"Geometry column detected as '{geom_col}' for files:\n         {formatted_files}\n         Rename to 'geom'? (y/n): ")
-                if action.lower() == 'y':
-                    for info in file_info_list:
-                        if info['input_geom_col'] == geom_col:
-                            gdf = info['gdf']
-                            gdf = gdf.rename_geometry('geom')
-                            gdf.set_geometry('geom', inplace=True)  # Add this line
-                            gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
-                            info['gdf'] = gdf  # Update the GeoDataFrame in info
-                            info['input_geom_col'] = 'geom'
-                            info['renamed'] = True
-                    logger.info(f"Geometry columns renamed to 'geom' for files with '{geom_col}' column.")
-                else:
-                    for info in file_info_list:
-                        if info['input_geom_col'] == geom_col:
-                            info['renamed'] = False
+    for info in file_info_list:
+        gdf = info['gdf']
+        if gdf.geometry.name != 'geom':
+            gdf = gdf.rename_geometry('geom')
+            gdf.set_geometry('geom', inplace=True)
+            gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
+            info['gdf'] = gdf
+            info['input_geom_col'] = 'geom'
 
     # Define columns to exclude from comparison dynamically
     exclude_cols = set()
@@ -693,21 +637,37 @@ def process_files(args, conn, existing_tables):
         for info in file_info_list:
             file = info['file']
             table_name = info['table_name']
-            input_geom_col = info['input_geom_col']
             gdf = info['gdf']
             
-            logger.info(f"Processing {file}")
-            
             try:
-                # Use schema-qualified table name for to_postgis
-                qualified_table = f"{schema}.{table_name}"
-                num_geometries = len(gdf)
+                logger.info(f"Processing {file}")
                 
+                if table_name in existing_tables:
+                    # Check existing geometry column name in PostGIS
+                    existing_geom_col = get_db_geometry_column(conn, table_name, schema=schema)
+                    
+                    # Only keep 'geometry' if it's the existing column name, otherwise use 'geom'
+                    target_geom_col = 'geometry' if existing_geom_col == 'geometry' else 'geom'
+                    
+                    if gdf.geometry.name != target_geom_col:
+                        logger.debug(f"Renaming geometry column from '{gdf.geometry.name}' to '{target_geom_col}'")
+                        gdf = gdf.rename_geometry(target_geom_col)
+                        gdf.set_geometry(target_geom_col, inplace=True)
+                        gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
+                else:
+                    # For new tables, always use 'geom'
+                    if gdf.geometry.name != 'geom':
+                        logger.debug(f"Renaming geometry column from '{gdf.geometry.name}' to 'geom'")
+                        gdf = gdf.rename_geometry('geom')
+                        gdf.set_geometry('geom', inplace=True)
+                        gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
+
+                # Continue with existing comparison and processing logic
                 if table_name in existing_tables:
                     logger.info(f"Table {table_name} exists, analyzing differences...")
                     
                     new_geoms, updated_geoms, identical_geoms = compare_geometries(
-                        gdf, conn, table_name, input_geom_col, exclude_columns=exclude_cols, args=args
+                        gdf, conn, table_name, gdf.geometry.name, exclude_columns=exclude_cols, args=args
                     )
                     
                     # Create summary of differences
@@ -759,6 +719,8 @@ def process_files(args, conn, existing_tables):
                         update_geometries(updated_geoms, table_name, engine, unique_id_column='osm_id')  # Adjust unique_id_column as needed
                     
                 else:
+                    num_geometries = len(gdf)
+                    qualified_table = f"{schema}.{table_name}"
                     logger.info(f"Found {num_geometries} new geometries to import into new table '{qualified_table}'")
                     
                     # Add coordinate printing for new tables
@@ -924,7 +886,7 @@ def main():
     # Securely handle the password
     password = os.getenv('DB_PASSWORD')
     if not password:
-        password = getpass.getpass(prompt='         Database password: ')
+        password = getpass.getpass(prompt='Database password: ')
     
     # Update the args namespace with the password
     args.password = password
