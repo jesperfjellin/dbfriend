@@ -40,6 +40,9 @@ logger = logging.getLogger("rich")
 def print_geometry_details(row, status="", coordinates_enabled=False):
     """Print coordinates and attributes for a geometry."""
     if not coordinates_enabled:  # Skip if flag not set
+        # Still log basic info without coordinates
+        if isinstance(row, dict):
+            logger.info(row.get('name', ''))
         return
     
     # Try both 'geometry' and 'geom' column names
@@ -47,8 +50,14 @@ def print_geometry_details(row, status="", coordinates_enabled=False):
     if geom is None:
         logger.warning(f"No geometry column found in row: {row}")
         return
-        
-    attrs = row.drop(['geometry', 'geom'] if 'geometry' in row else ['geom']).to_dict()
+    
+    # Extract attributes excluding geometry columns
+    if isinstance(row, dict):
+        attrs = {k: v for k, v in row.items() if k not in ('geometry', 'geom')}
+    else:
+        # Assume it's a pandas/geopandas DataFrame row
+        attrs = row.drop(['geometry', 'geom'] if 'geometry' in row else ['geom']).to_dict()
+    
     attrs_str = ", ".join(f"{k}: {v}" for k, v in attrs.items())
     
     # Prepare output text
@@ -58,7 +67,7 @@ def print_geometry_details(row, status="", coordinates_enabled=False):
     ]
     
     if geom.geom_type == 'Point':
-        output_lines.append(f"Coordinates: ({geom.x}, {geom.y})")
+        output_lines.append(f"Coordinates: ({geom.x:.6f}, {geom.y:.6f})")
     else:
         if hasattr(geom, 'exterior'):
             coords = list(geom.exterior.coords)
