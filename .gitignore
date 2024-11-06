@@ -1,5 +1,5 @@
-# Ignore everything in the dbfriend.egg-info folder
 /dbfriend.egg-info/
 
-# Ignore everything in the logs folder
+/.history/
+
 /logs/

@@ -772,9 +772,9 @@ def process_files(args, conn, existing_tables):
     # After the progress bar completes, show the summary
     logger.info("All tasks completed ✓")
     logger.info("Summary of tasks:\n"
-               f"[green]{format(num_new, ',').replace(',', ' ')}[/] new geometries added, "
-               f"[yellow]{format(num_updated, ',').replace(',', ' ')}[/] updated geometries, "
-               f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped")
+               f"[green]{format(total_new, ',').replace(',', ' ')}[/] new geometries added, "
+               f"[yellow]{format(total_updated, ',').replace(',', ' ')}[/] updated geometries, "
+               f"{format(total_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped")
 
 def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
     cursor = conn.cursor()
