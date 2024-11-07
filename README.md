@@ -12,16 +12,34 @@
 
 ---
 
-**dbfriend** is a command-line tool for loading and synchronizing spatial data with PostGIS databases. It intelligently handles data updates by comparing geometries and attributes, identifying new, updated, and identical features. 
+**dbfriend** is a command-line tool designed to simplify the loading and synchronization of spatial data into PostGIS databases. It focuses on data integrity and safety, ensuring that your database operations are reliable and efficient. By handling complex tasks intelligently, dbfriend helps GIS professionals and database administrators streamline their workflows.
 
-Key features:
-- Supports multiple vector formats (GeoJSON, Shapefile, GeoPackage, KML, GML)
-- Smart geometry comparison to prevent duplicates
-- Attribute-aware updates for existing geometries
-- Automatic geometry column detection and renaming
-- CRS compatibility checks and automatic reprojection
-- Batch processing with progress tracking
-- Spatial index creation for optimized queries
+### Key Features
+
+
+- **Transactional Operations for Data Integrity**  
+  All database operations are executed within transactions. This means that either all changes are committed successfully, or none are applied. This approach protects your database from partial updates and maintains consistency.
+
+- **Automated Table Backups**  
+  Before modifying any existing tables, dbfriend automatically creates backups, keeping up to three historical versions per table. This allows for easy restoration if needed and provides an extra layer of data safety.
+
+- **Supports Multiple Vector Formats**  
+  Load data from various spatial file formats, including GeoJSON, Shapefile, GeoPackage, KML, and GML, offering flexibility in handling different data sources.
+
+- **Intelligent Geometry Comparison**  
+  Prevent duplicates and ensure data consistency by comparing geometries using hashes to detect new, updated, and identical features efficiently.
+
+- **Attribute-Aware Updates**  
+  Update existing geometries based on attribute changes, so your database always reflects the most current data.
+
+- **Automatic Geometry Handling**  
+  Automatically detects and renames geometry columns to a standard format, simplifying data processing and integration.
+
+- **CRS Compatibility Checks and Automatic Reprojection**  
+  Verifies Coordinate Reference System (CRS) compatibility and automatically reprojects data as needed, ensuring spatial data aligns correctly within your database.
+
+- **Spatial Index Creation for Optimized Queries**  
+  Automatically creates spatial indexes on imported data, improving query performance and data retrieval speeds.
 
 
 
