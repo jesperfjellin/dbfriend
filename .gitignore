@@ -13,3 +13,5 @@
 /dbfriend/tests/__pycache__/
 
 .env
+
+/backups/*.sql
