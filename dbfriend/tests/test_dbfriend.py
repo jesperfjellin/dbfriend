@@ -1,6 +1,6 @@
 import pytest
 from pandas.testing import assert_frame_equal
-from unittest.mock import MagicMock, patch, mock_open, call
+from unittest.mock import MagicMock, patch, mock_open, call, ANY
 from dbfriend.dbfriend import (
     compute_geom_hash,
     get_non_essential_columns,
@@ -11,14 +11,24 @@ from dbfriend.dbfriend import (
     print_geometry_details,
     connect_db,
     check_crs_compatibility,
-    get_existing_tables
+    get_existing_tables,
+    append_geometries,
+    create_generic_geometry_table,
+    compare_geometries,
+    process_files
 )
 import hashlib
 from geopandas import GeoDataFrame, GeoSeries
 from geopandas.testing import assert_geodataframe_equal
-from shapely.geometry import Point
+from shapely.geometry import Point, LineString, Polygon
 import psycopg2
 import sys
+from sqlalchemy import create_engine
+import os
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def normalize_sql(sql):
     # Remove newlines and extra spaces
@@ -482,3 +492,216 @@ def test_get_existing_tables(mocker):
 
     assert actual_sql == expected_sql
     mock_cursor.execute.assert_called_with(mock_cursor.execute.call_args[0][0], ('public',))
+
+# 11. Testing append_geometries
+def test_append_geometries():
+    """Test the new append_geometries function with schema handling"""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    
+    # Create a proper mock for SQLAlchemy engine
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value = MagicMock()
+    
+    # Create test GeoDataFrame
+    gdf = GeoDataFrame({'geometry': [Point(1, 1)]}, crs='EPSG:4326')
+    
+    # Mock to_postgis to avoid actual database operations
+    with patch('geopandas.GeoDataFrame.to_postgis') as mock_to_postgis:
+        mock_to_postgis.return_value = None
+        
+        # Test with default schema
+        result = append_geometries(mock_conn, mock_engine, gdf, 'test_table')
+        assert result is True
+        
+        # Verify to_postgis was called correctly
+        mock_to_postgis.assert_called_with(
+            'temp_test_table',
+            mock_engine,
+            schema='public',
+            if_exists='replace',
+            index=False
+        )
+
+# 12. Testing create_generic_geometry_table
+def test_create_generic_geometry_table():
+    """Test table creation with generic geometry type"""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_engine = MagicMock()
+    
+    # Mock cursor.fetchone() to return a geometry column name
+    mock_cursor.fetchone.return_value = ('geom',)
+    
+    result = create_generic_geometry_table(mock_conn, mock_engine, 'test_table', 4326)
+    assert result is True
+    
+    # Get all SQL calls
+    sql_calls = [call_args[0][0] for call_args in mock_cursor.execute.call_args_list]
+    
+    # Find the CREATE TABLE statement
+    create_table_sql = next(sql for sql in sql_calls if 'CREATE TABLE' in sql)
+    
+    # Verify SQL contains generic geometry type
+    expected_sql = 'CREATE TABLE public.test_table (geom geometry(Geometry, 4326))'
+    assert normalize_sql(expected_sql) in normalize_sql(create_table_sql)
+
+# 13. Testing compare_geometries
+def test_compare_geometries():
+    """Test geometry comparison logic with hashing"""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    
+    # Mock get_db_geometry_column
+    with patch('dbfriend.dbfriend.get_db_geometry_column') as mock_get_geom:
+        mock_get_geom.return_value = 'geom'
+        
+        # Set up the context manager mock properly
+        context_cursor = MagicMock()
+        context_cursor.fetchall.return_value = [('hash1',)]
+        
+        # Configure the cursor context manager
+        cursor_cm = MagicMock()
+        cursor_cm.__enter__.return_value = context_cursor
+        cursor_cm.__exit__.return_value = None
+        mock_conn.cursor.return_value = cursor_cm
+        
+        # Create test GeoDataFrame with known hashes
+        with patch('geopandas.GeoSeries.apply') as mock_apply:
+            # Mock the apply function to return predetermined hashes
+            mock_apply.return_value = pd.Series(['hash1', 'hash2'])
+            
+            # Create GeoDataFrame with the geometry column already named 'geom'
+            gdf = GeoDataFrame({
+                'geom': [Point(1, 1), Point(2, 2)]
+            }, geometry='geom', crs='EPSG:4326')
+            
+            new_geoms, updated_geoms, identical_geoms = compare_geometries(
+                gdf, mock_conn, 'test_table', schema='public'
+            )
+            
+            # Verify SQL was executed
+            assert context_cursor.execute.called, "SQL execute should have been called"
+            sql_call = context_cursor.execute.call_args[0][0]
+            assert 'SELECT MD5(ST_AsBinary(geom))' in sql_call.replace('\n', ' '), "SQL should include hash computation"
+            
+            # Check return values match expected behavior
+            assert new_geoms is not None, "Should have new geometries"
+            assert updated_geoms is None, "Should have no updated geometries"
+            assert identical_geoms is not None, "Should have identical geometries"
+            
+            # Verify the contents
+            assert len(new_geoms) == 1, "Should have one new geometry"
+            assert new_geoms.iloc[0].geom.equals(Point(2, 2)), "New geometry should be Point(2, 2)"
+            
+            assert len(identical_geoms) == 1, "Should have one identical geometry"
+            assert identical_geoms.iloc[0].geom.equals(Point(1, 1)), "Identical geometry should be Point(1, 1)"
+
+# 14. Testing process_files_schema_handling
+def test_process_files_schema_handling():
+    """Test process_files with schema specification"""
+    mock_conn = MagicMock()
+    
+    # Create a more complete mock args object
+    args = MagicMock(
+        schema='custom',
+        table='test_table',
+        epsg=4326,
+        dbname='test_db',
+        dbuser='test_user',
+        password='test_pass',
+        host='localhost',
+        port='5432',
+        filepath='test/path'  # String path instead of list
+    )
+    
+    # Create test GeoDataFrame
+    test_gdf = GeoDataFrame({'geometry': [Point(1, 1)]}, crs='EPSG:4326')
+    
+    # Mock os.listdir, create_engine and read_file
+    with patch('os.listdir', return_value=['test.shp']), \
+         patch('sqlalchemy.create_engine') as mock_create_engine, \
+         patch('geopandas.read_file', return_value=test_gdf):
+        
+        process_files(args, mock_conn, [])
+
+@pytest.mark.integration
+def test_mixed_geometry_types():
+    """Test handling of mixed geometry types in a single table"""
+    if not all([
+        os.getenv('TEST_DB_NAME'),
+        os.getenv('TEST_DB_USER'),
+        os.getenv('TEST_DB_PASS')
+    ]):
+        pytest.skip("Test database credentials not configured")
+    
+    cursor = None
+    conn = None
+    test_table = 'test_mixed_geometries'
+    schema = 'public'
+    
+    try:
+        # Setup database connection
+        conn = psycopg2.connect(
+            dbname=os.getenv('TEST_DB_NAME'),
+            user=os.getenv('TEST_DB_USER'),
+            password=os.getenv('TEST_DB_PASS'),
+            host=os.getenv('TEST_DB_HOST', 'localhost'),
+            port=os.getenv('TEST_DB_PORT', '5432')
+        )
+        
+        cursor = conn.cursor()
+        
+        # Ensure PostGIS extension is enabled
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
+        conn.commit()
+
+        # Create test table with generic geometry
+        cursor.execute(f"""
+            DROP TABLE IF EXISTS {schema}.{test_table};
+            CREATE TABLE {schema}.{test_table} (
+                id SERIAL PRIMARY KEY,
+                geometry geometry(Geometry, 4326)  -- Changed from 'geom' to 'geometry'
+            );
+        """)
+        conn.commit()
+
+        # Create test data
+        point_gdf = GeoDataFrame({
+            'geometry': [Point(0, 0), Point(1, 1)]
+        }, crs='EPSG:4326')
+        
+        # Create SQLAlchemy engine
+        engine = create_engine(
+            f'postgresql://{os.getenv("TEST_DB_USER")}:{os.getenv("TEST_DB_PASS")}'
+            f'@{os.getenv("TEST_DB_HOST", "localhost")}:{os.getenv("TEST_DB_PORT", "5432")}'
+            f'/{os.getenv("TEST_DB_NAME")}'
+        )
+        
+        # Insert the data
+        point_gdf.to_postgis(
+            test_table,
+            engine,
+            if_exists='append',
+            index=False
+        )
+
+        # Verify count
+        cursor.execute(f"SELECT COUNT(*) FROM {schema}.{test_table}")
+        count = cursor.fetchone()[0]
+        assert count == 2, f"Expected 2 geometries, found {count}"
+
+    except Exception as e:
+        pytest.fail(f"Test failed: {str(e)}")
+
+    finally:
+        # Cleanup
+        if cursor:
+            cursor.execute(f"DROP TABLE IF EXISTS {schema}.{test_table}")
+            conn.commit()
+            cursor.close()
+        if conn:
+            conn.close()
