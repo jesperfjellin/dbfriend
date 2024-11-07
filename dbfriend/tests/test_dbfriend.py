@@ -615,7 +615,7 @@ def test_process_files_schema_handling():
         password='test_pass',
         host='localhost',
         port='5432',
-        filepath='test/path'  # String path instead of list
+        filepath='test/path'  
     )
     
     # Create test GeoDataFrame
@@ -626,7 +626,11 @@ def test_process_files_schema_handling():
          patch('sqlalchemy.create_engine') as mock_create_engine, \
          patch('geopandas.read_file', return_value=test_gdf):
         
-        process_files(args, mock_conn, [])
+        # Add the missing required arguments
+        existing_tables = []
+        schema = 'custom'
+        
+        process_files(args, mock_conn, mock_create_engine, existing_tables, schema)
 
 @pytest.mark.integration
 def test_mixed_geometry_types():
