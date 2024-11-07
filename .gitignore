@@ -11,3 +11,5 @@
 /dbfriend/.history/
 
 /dbfriend/tests/__pycache__/
+
+.env
