@@ -673,9 +673,7 @@ def process_files(args, conn, existing_tables):
                             continue
                         
                         # For new tables, all geometries are new
-                        logger.info(f"Found {len(gdf)} [green]new[/] geometries, "
-                                  f"0 [yellow]updated[/] geometries, and "
-                                  f"0 [red]identical[/] geometries skipped.")
+                        logger.info(f"Found {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries.")
                         
                         # Append first batch of geometries
                         logger.info(f"Appending {format(len(gdf), ',').replace(',', ' ')} geometries to '{qualified_table}'")
