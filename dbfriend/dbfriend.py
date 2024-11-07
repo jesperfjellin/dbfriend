@@ -113,9 +113,12 @@ Options:
     --port            Database port (default: 5432).
     --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
                       or default to 4326.
-    --schema          Specify the database schema that the data will be queried from and written to.
+    --schema          Target schema name. If specified, all data will be loaded into this schema.
+                      If the schema does not exist, dbfriend will not generate one for
+                      safety reasons.
+    --table           Target table name. If specified, all data will be loaded into this table. 
+                      If the table does not exist, it will be created.
     --coordinates     Print coordinates and attributes for each geometry.
-    --table           Target table name. If specified, all data will be loaded into this table
     
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
