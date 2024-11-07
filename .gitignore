@@ -5,3 +5,9 @@
 /logs/
 
 /.pytest_cache/
+
+/dbfriend/__pycache__/
+
+/dbfriend/.history/
+
+/dbfriend/tests/__pycache__/
