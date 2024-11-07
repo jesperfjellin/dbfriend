@@ -79,6 +79,7 @@ Options:
     --table           Target table name. If specified, all data will be loaded into this table. 
                       If the table does not exist, it will be created.
     --coordinates     Print coordinates and attributes for each geometry.
+    --no-backup       Do not create backups of existing tables before modifying them.
 
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 ```
