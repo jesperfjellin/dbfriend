@@ -115,6 +115,7 @@ Options:
                       or default to 4326.
     --schema          Specify the database schema that the data will be queried from and written to.
     --coordinates     Print coordinates and attributes for each geometry.
+    --table           Target table name. If specified, all data will be loaded into this table
     
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
@@ -150,6 +151,8 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
                        help='Specify the database schema')
     parser.add_argument('--coordinates', action='store_true', 
                        help='Print coordinates and attributes for each geometry')
+    parser.add_argument('--table', 
+                       help='Target table name. If specified, all data will be loaded into this table')
 
     return parser.parse_args()
 
@@ -327,151 +330,52 @@ def get_non_essential_columns(conn, table_name: str, schema: str = 'public', cus
     
     return exclude_columns
 
-def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: str = 'geom', exclude_columns: List[str] = None, args=None):
-    """
-    Compare geometries between incoming GeoDataFrame and existing PostGIS table.
-    Returns a tuple of (new_geometries, updated_geometries, identical_geometries)
-    
-    Args:
-        gdf (GeoDataFrame): Incoming GeoDataFrame.
-        conn: Database connection object.
-        table_name (str): Name of the target table.
-        geom_column (str): Name of the geometry column.
-        exclude_columns (List[str], optional): Columns to exclude from comparison.
-    
-    Returns:
-        Tuple[GeoDataFrame, GeoDataFrame, GeoDataFrame]: New, Updated, Identical geometries.
-    """
+def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: str = 'geom', schema: str = 'public', exclude_columns: List[str] = None, args=None):
     cursor = conn.cursor()
     
     # Get the actual geometry column name from the database
-    db_geom_column = get_db_geometry_column(conn, table_name, schema='public')
+    db_geom_column = get_db_geometry_column(conn, table_name, schema=schema)
     if not db_geom_column:
-        logger.error(f"No geometry column found in table '{table_name}'")
+        logger.error(f"No geometry column found in table '{schema}.{table_name}'")
         return None, None, None
-        
-    # Get common columns between GDF and database table
-    common_columns = [col for col in gdf.columns if col != geom_column]
-    if exclude_columns:
-        common_columns = [col for col in common_columns if col not in exclude_columns]
-    
-    # Use the database geometry column name for the SQL query
-    if common_columns:
-        quoted_columns = ', '.join(f'"{col}"' for col in common_columns)
-        columns_sql = f"MD5(ST_AsBinary({db_geom_column})) as geom_hash, {quoted_columns}"
-    else:
-        columns_sql = f"MD5(ST_AsBinary({db_geom_column})) as geom_hash"
     
     sql = f"""
-    SELECT {columns_sql}
-    FROM "{table_name}"
+    SELECT MD5(ST_AsBinary({db_geom_column})) as geom_hash
+    FROM {schema}.{table_name}
     """
-    logger.debug(f"Executing SQL: {sql}")
     
-    existing_records = {}
+    # Get existing geometry hashes from database
+    existing_hashes = set()
     with conn.cursor() as cur:
         cur.execute(sql)
-        rows = cur.fetchall()
-        logger.debug(f"Raw database results: {rows}")
-        
-        for row in rows:
-            geom_hash = row[0]
-            attrs = {col: row[i+1] for i, col in enumerate(common_columns)}
-            if geom_hash not in existing_records:
-                existing_records[geom_hash] = []
-            existing_records[geom_hash].append(attrs)
-            
-    logger.debug(f"Existing records from database: {existing_records}")
-    
-    cursor.close()
+        for row in cur.fetchall():
+            existing_hashes.add(row[0])
     
     # Create temporary copy of GDF for comparison
     comparison_gdf = gdf.copy()
-    
-    # Compute geometry hashes
     comparison_gdf['geom_hash'] = comparison_gdf[geom_column].apply(compute_geom_hash)
     
-    # Compare records
+    # Compare with database hashes
     new_geometries = []
-    updated_geometries = []
     identical_geometries = []
-    
-    # Keep track of processed geometries to avoid duplicates
-    processed_geom_hashes = set()
     
     for idx, row in comparison_gdf.iterrows():
         geom_hash = row['geom_hash']
-        
-        if geom_hash in processed_geom_hashes:
-            logger.debug(f"Skipping duplicate geometry with hash {geom_hash}")
-            continue
-            
-        if geom_hash not in existing_records:
-            logger.debug(f"New geometry found with hash {geom_hash}")
-            print_geometry_details(row, "NEW", args.coordinates)
-            new_geometries.append(row)
-            processed_geom_hashes.add(geom_hash)
-            continue
-        
-        # Compare attributes with all existing records having the same geom_hash
-        if common_columns:
-            current_attrs = {col: str(row[col]).strip() if pd.notnull(row[col]) else None 
-                           for col in common_columns}
-            
-            logger.debug("\nComparing record:")
-            logger.debug(f"Current attributes: {current_attrs}")
-            logger.debug(f"Existing records: {existing_records[geom_hash]}")
-            
-            # Compare with existing records
-            found_match = False
-            for existing_attrs in existing_records[geom_hash]:
-                # Normalize existing attributes the same way
-                existing_attrs = {col: str(val).strip() if val is not None else None 
-                                for col, val in existing_attrs.items()}
-                
-                if current_attrs == existing_attrs:
-                    logger.debug("Found exact match")
-                    print_geometry_details(row, "DUPLICATE", args.coordinates)
-                    identical_geometries.append(row)
-                    found_match = True
-                    break
-                else:
-                    # Log differences
-                    differences = {
-                        col: (current_attrs.get(col), existing_attrs.get(col))
-                        for col in common_columns
-                        if current_attrs.get(col) != existing_attrs.get(col)
-                    }
-                    logger.debug(f"Differences found: {differences}")
-                    print_geometry_details(row, "UPDATED", args.coordinates)
-            
-            if not found_match:
-                logger.debug("No match found - marking as updated")
-                updated_geometries.append(row)
-            
-            processed_geom_hashes.add(geom_hash)
-        else:
+        if geom_hash in existing_hashes:
             identical_geometries.append(row)
-            processed_geom_hashes.add(geom_hash)
-
-    logger.debug(f"Processed geometry hashes: {processed_geom_hashes}")
-    logger.debug(f"New geometries: {len(new_geometries)}")
-    logger.debug(f"Updated geometries: {len(updated_geometries)}")
-    logger.debug(f"Identical geometries: {len(identical_geometries)}")
+        else:
+            new_geometries.append(row)
     
     # Convert lists to GeoDataFrames
     new_gdf = GeoDataFrame(new_geometries, geometry=geom_column, crs=gdf.crs) if new_geometries else GeoDataFrame(columns=gdf.columns)
-    updated_gdf = GeoDataFrame(updated_geometries, geometry=geom_column, crs=gdf.crs) if updated_geometries else GeoDataFrame(columns=gdf.columns)
     identical_gdf = GeoDataFrame(identical_geometries, geometry=geom_column, crs=gdf.crs) if identical_geometries else GeoDataFrame(columns=gdf.columns)
     
     # Remove temporary hash column
-    for gdf_temp in [new_gdf, updated_gdf, identical_gdf]:
+    for gdf_temp in [new_gdf, identical_gdf]:
         if 'geom_hash' in gdf_temp.columns:
             gdf_temp.drop('geom_hash', axis=1, inplace=True)
     
-    return new_gdf if not new_gdf.empty else None, \
-           updated_gdf if not updated_gdf.empty else None, \
-           identical_gdf if not identical_gdf.empty else None
+    return new_gdf if not new_gdf.empty else None, None, identical_gdf if not identical_gdf.empty else None
 
 def update_geometries(gdf, table_name, engine, unique_id_column):
     """Update existing geometries in PostGIS table."""
@@ -531,6 +435,81 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
         logger.info(f"Successfully updated {len(gdf)} geometries in {table_name}")
     except Exception as e:
         logger.error(f"Error updating geometries: {e}")
+
+def check_geometry_type_constraint(conn, table_name, schema='public'):
+    """Check if table has a specific geometry type constraint."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT type 
+        FROM geometry_columns 
+        WHERE f_table_schema = %s 
+        AND f_table_name = %s
+    """, (schema, table_name))
+    result = cursor.fetchone()
+    cursor.close()
+    
+    if result and result[0].upper() != 'GEOMETRY':
+        return result[0].upper()
+    return None
+
+def create_generic_geometry_table(conn, engine, table_name, srid, schema='public'):
+    """Create a new table with a generic geometry column and specified SRID."""
+    cursor = conn.cursor()
+    try:
+        # Drop table if it exists
+        cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table_name}")
+        
+        # Create table with generic geometry type and SRID
+        sql = f"""
+        CREATE TABLE {schema}.{table_name} (
+            geom geometry(Geometry, {srid})
+        );
+        """
+        cursor.execute(sql)
+        
+        # Add spatial index
+        create_spatial_index(conn, table_name, schema=schema)
+        
+        conn.commit()
+        logger.info(f"Created new table '{schema}.{table_name}' with generic geometry type (SRID: {srid})")
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating table: {e}")
+        return False
+    finally:
+        cursor.close()
+
+def append_geometries(conn, engine, gdf, table_name, schema='public'):
+    """Append geometries using raw SQL to avoid CRS issues."""
+    cursor = conn.cursor()
+    try:
+        # Create temporary table with schema
+        temp_table = f"temp_{table_name}"
+        gdf.to_postgis(
+            temp_table,
+            engine,
+            schema=schema,  # Specify schema for temp table
+            if_exists='replace',
+            index=False
+        )
+        
+        # Copy geometries from temp to main table (schema already in qualified names)
+        cursor.execute(f"""
+            INSERT INTO {schema}.{table_name} (geom)
+            SELECT geom FROM {schema}.{temp_table}
+        """)
+        
+        # Clean up (include schema in drop)
+        cursor.execute(f"DROP TABLE IF EXISTS {schema}.{temp_table}")
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error appending geometries: {e}")
+        return False
+    finally:
+        cursor.close()
 
 def process_files(args, conn, existing_tables):
     # Modify the engine creation to include schema if specified
@@ -631,6 +610,17 @@ def process_files(args, conn, existing_tables):
     else:
         logger.debug("No columns excluded from comparison.")
     
+    # Check for geometry type constraint if using --table and table exists
+    if args.table and args.table in existing_tables:
+        geom_type = check_geometry_type_constraint(conn, args.table, schema)
+        if geom_type:
+            logger.error(f"[red]Error: Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.[/red]")
+            logger.error("[yellow]To use this table with mixed geometry types, you need to either:[/yellow]")
+            logger.error("  1. Drop the existing table and let dbfriend create it with a generic geometry type")
+            logger.error("  2. Use a different table name")
+            logger.error("\nExiting to allow you to make this decision.")
+            sys.exit(1)
+
     # Initialize rich Progress
     with Progress(
         SpinnerColumn(),
@@ -645,13 +635,83 @@ def process_files(args, conn, existing_tables):
         
         for info in file_info_list:
             file = info['file']
-            table_name = info['table_name']
+            table_name = args.table if args.table else info['table_name']
+            qualified_table = f"{schema}.{table_name}"
             gdf = info['gdf']
             
             try:
                 logger.info(f"Processing {file}")
                 
-                if table_name in existing_tables:
+                # Handle geometry column naming
+                if gdf.geometry.name != 'geom':
+                    gdf = gdf.rename_geometry('geom')
+                    gdf.set_geometry('geom', inplace=True)
+                    gdf.set_crs(gdf.crs, inplace=True)
+                
+                # Ensure valid CRS
+                if not gdf.crs:
+                    logger.warning(f"No CRS found in {file}, defaulting to EPSG:4326")
+                    gdf.set_crs(epsg=4326, inplace=True)
+                
+                if args.table:
+                    # When using --table, only keep the geometry column
+                    gdf = gdf[['geom']]
+                    
+                    if table_name not in existing_tables:
+                        # Get SRID from data or args
+                        srid = args.epsg if args.epsg else gdf.crs.to_epsg()
+                        if not srid:
+                            srid = 4326  # Default to WGS84 if no SRID found
+                        
+                        # Create table with generic geometry type and SRID
+                        if create_generic_geometry_table(conn, engine, table_name, srid, schema):
+                            existing_tables.append(table_name)
+                        else:
+                            continue
+                        
+                        # For new tables, all geometries are new
+                        logger.info(f"Found {len(gdf)} [green]new[/] geometries, "
+                                  f"0 [yellow]updated[/] geometries, and "
+                                  f"0 [red]identical[/] geometries skipped.")
+                        
+                        # Append first batch of geometries
+                        logger.info(f"Appending {format(len(gdf), ',').replace(',', ' ')} geometries to '{qualified_table}'")
+                        if append_geometries(conn, engine, gdf, table_name, schema):
+                            total_new += len(gdf)
+                    else:
+                        # Compare geometries before appending
+                        new_geoms, updated_geoms, identical_geoms = compare_geometries(
+                            gdf, conn, table_name, 'geom', schema=schema, exclude_columns=[], args=args
+                        )
+                        
+                        # Create summary of differences for this dataset
+                        num_new = len(new_geoms) if new_geoms is not None else 0
+                        num_updated = len(updated_geoms) if updated_geoms is not None else 0
+                        num_identical = len(identical_geoms) if identical_geoms is not None else 0
+                        
+                        logger.info(f"Found {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries, "
+                                  f"{format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries, and "
+                                  f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped.")
+                        
+                        if new_geoms is not None and not new_geoms.empty:
+                            logger.info(f"Appending {format(len(new_geoms), ',').replace(',', ' ')} geometries to '{qualified_table}'")
+                            if append_geometries(conn, engine, new_geoms, table_name, schema):
+                                total_new += len(new_geoms)
+                        
+                        if identical_geoms is not None:
+                            total_identical += len(identical_geoms)
+                elif table_name in existing_tables:
+                    logger.info(f"Table {qualified_table} exists, analyzing differences...")
+                    
+                    # Get common columns between GDF and database table
+                    common_columns = [col for col in gdf.columns if col != 'geom']
+                    if not common_columns:
+                        # If no common columns, just compare geometries
+                        columns_sql = "MD5(ST_AsBinary(geom)) as geom_hash"
+                    else:
+                        quoted_columns = ', '.join(f'"{col}"' for col in common_columns)
+                        columns_sql = f"MD5(ST_AsBinary(geom)) as geom_hash, {quoted_columns}"
+                    
                     # Check existing geometry column name in PostGIS
                     existing_geom_col = get_db_geometry_column(conn, table_name, schema=schema)
                     
@@ -663,17 +723,6 @@ def process_files(args, conn, existing_tables):
                         gdf = gdf.rename_geometry(target_geom_col)
                         gdf.set_geometry(target_geom_col, inplace=True)
                         gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
-                else:
-                    # For new tables, always use 'geom'
-                    if gdf.geometry.name != 'geom':
-                        logger.debug(f"Renaming geometry column from '{gdf.geometry.name}' to 'geom'")
-                        gdf = gdf.rename_geometry('geom')
-                        gdf.set_geometry('geom', inplace=True)
-                        gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
-
-                # Continue with existing comparison and processing logic
-                if table_name in existing_tables:
-                    logger.info(f"Table {table_name} exists, analyzing differences...")
                     
                     new_geoms, updated_geoms, identical_geoms = compare_geometries(
                         gdf, conn, table_name, gdf.geometry.name, exclude_columns=exclude_cols, args=args
@@ -688,8 +737,8 @@ def process_files(args, conn, existing_tables):
                     total_updated += num_updated
                     total_identical += num_identical
                     
-                    logger.info(f"Found {format(num_new, ',')} [green]new[/] geometries, "
-                               f"{format(num_updated, ',')}[yellow] updated[/] geometries, and "
+                    logger.info(f"Found {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries, "
+                               f"{format(num_updated, ',').replace(',', ' ')}[yellow] updated[/] geometries, and "
                                f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped. "
                                "Skipping identical geometries...")
                     
@@ -709,7 +758,6 @@ def process_files(args, conn, existing_tables):
                     if num_new > 0:
                         try:
                             # Use schema-qualified table name
-                            qualified_table = f"{schema}.{table_name}"
                             new_geoms.to_postgis(
                                 qualified_table, 
                                 engine, 
@@ -729,7 +777,6 @@ def process_files(args, conn, existing_tables):
                     
                 else:
                     num_geometries = len(gdf)
-                    qualified_table = f"{schema}.{table_name}"
                     logger.info(f"Found {num_geometries} new geometries to import into new table '{qualified_table}'")
                     
                     # Add coordinate printing for new tables
@@ -781,8 +828,8 @@ def process_files(args, conn, existing_tables):
     # After the progress bar completes, show the summary
     logger.info("All tasks completed ✓")
     logger.info("Summary of tasks:\n"
-               f"[green]{format(total_new, ',').replace(',', ' ')}[/] new geometries added, "
-               f"[yellow]{format(total_updated, ',').replace(',', ' ')}[/] updated geometries, "
+               f"{format(total_new, ',').replace(',', ' ')}[green] new[/] geometries added, "
+               f"{format(total_updated, ',').replace(',', ' ')}[yellow] updated[/] geometries, "
                f"{format(total_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped")
 
 def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
