@@ -180,14 +180,13 @@ def connect_db(dbname, dbuser, host, port, password):
         sys.exit(1)
 
 def get_existing_tables(conn, schema='public'):
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = %s;
-    """, (schema,))
-    tables = [row[0] for row in cursor.fetchall()]
-    cursor.close()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = %s;
+        """, (schema,))
+        tables = [row[0] for row in cursor.fetchall()]
     return tables
 
 def identify_affected_tables(file_info_list, args, schema='public'):
@@ -229,7 +228,17 @@ def backup_tables(conn, tables, schema='public'):
     backup_dir = os.path.join(os.getcwd(), 'backups')
     backup_info = {}
     
+    try:
+        # Create backups directory if it doesn't exist
+        os.makedirs(backup_dir, exist_ok=True)
+    except Exception as e:
+        logger.error(f"Failed to create backup directory: {e}")
+        return backup_info  # Continue without backups
+    
     for table in tables:
+        # Ensure table name is lowercase for consistency
+        table = table.lower()
+        
         if not check_table_exists(conn, table, schema):
             logger.info(f"Table '{schema}.{table}' does not exist, no backup needed.")
             continue
@@ -244,7 +253,7 @@ def backup_tables(conn, tables, schema='public'):
                 f'--port={conn.info.port}',
                 f'--username={conn.info.user}',
                 f'--dbname={conn.info.dbname}',
-                f'--table={schema}.{table}',
+                f'--table={schema}.{table}',  # Use lowercase table name
                 '--format=p',
                 f'--file={backup_file}'
             ]
@@ -260,71 +269,68 @@ def backup_tables(conn, tables, schema='public'):
             logger.info(f"Created backup of '{schema}.{table}' to '{backup_file}'")
             
             # Manage old backups
-            manage_old_backups(backup_dir, table)
+            manage_old_backups(backup_dir, table)  # Pass lowercase table name
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to backup table '{schema}.{table}': {e.stderr.decode()}")
-            return None
+            # Continue processing even if backup fails
             
     return backup_info
 
 def create_spatial_index(conn, table_name, schema='public', geom_column='geom'):
-    cursor = conn.cursor()
     # Get the actual geometry column name
     actual_geom_column = get_db_geometry_column(conn, table_name, schema=schema) or geom_column
     index_name = f"{schema}_{table_name}_{actual_geom_column}_idx"
     
     try:
-        cursor.execute(f"""
-            CREATE INDEX IF NOT EXISTS "{index_name}"
-            ON "{schema}"."{table_name}"
-            USING GIST ("{actual_geom_column}");
-        """)
-        conn.commit()
-        logger.info(f"Spatial index created on table '{schema}.{table_name}'")
+        with conn.cursor() as cursor:
+            cursor.execute(f"""
+                CREATE INDEX IF NOT EXISTS "{index_name}"
+                ON "{schema}"."{table_name}"
+                USING GIST ("{actual_geom_column}");
+            """)
+            conn.commit()
+            logger.info(f"Spatial index created on table '{schema}.{table_name}'")
     except Exception as e:
         logger.error(f"Error creating spatial index on '{schema}.{table_name}': {e}")
         conn.rollback()
-    finally:
-        cursor.close()
 
 def get_db_geometry_column(conn, table_name, schema='public'):
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT f_geometry_column
-        FROM geometry_columns
-        WHERE f_table_schema = %s AND f_table_name = %s;
-    """, (schema, table_name))
-    result = cursor.fetchone()
-    cursor.close()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT f_geometry_column
+            FROM geometry_columns
+            WHERE f_table_schema = %s AND f_table_name = %s;
+        """, (schema, table_name))
+        result = cursor.fetchone()
+        
     if result:
         return result[0]
     else:
         # If geometry_columns is empty, check information_schema
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s AND udt_name = 'geometry';
-        """, (schema, table_name))
-        result = cursor.fetchone()
-        cursor.close()
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s AND udt_name = 'geometry';
+            """, (schema, table_name))
+            result = cursor.fetchone()
+            
         if result:
             return result[0]
         else:
             return None
 
 def check_table_exists(conn, table_name, schema='public'):
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = %s AND table_name = %s
-        );
-    """, (schema, table_name))
-    exists = cursor.fetchone()[0]
-    cursor.close()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = %s AND table_name = %s
+            );
+        """, (schema, table_name))
+        exists = cursor.fetchone()[0]
     return exists
 
 def compute_geom_hash(geometry):
@@ -347,39 +353,38 @@ def get_non_essential_columns(conn, table_name: str, schema: str = 'public', cus
     if custom_patterns is None:
         custom_patterns = []
     
-    cursor = conn.cursor()
-    
-    # Fetch all column names
-    cursor.execute(f"""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = '{schema}'
-          AND table_name   = '{table_name}'
-    """)
-    all_columns = set(row[0] for row in cursor.fetchall())
-    
-    # Fetch primary key columns
-    cursor.execute(f"""
-        SELECT kcu.column_name
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-        WHERE tc.constraint_type = 'PRIMARY KEY'
-          AND tc.table_schema = '{schema}'
-          AND tc.table_name = '{table_name}'
-    """)
-    pk_columns = set(row[0] for row in cursor.fetchall())
-    
-    # Fetch columns with default values indicating auto-generation (e.g., sequences)
-    cursor.execute(f"""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = '{schema}'
-          AND table_name   = '{table_name}'
-          AND column_default IS NOT NULL
-    """)
-    default_columns = set(row[0] for row in cursor.fetchall())
+    with conn.cursor() as cursor:
+        # Fetch all column names
+        cursor.execute(f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = '{schema}'
+              AND table_name   = '{table_name}'
+        """)
+        all_columns = set(row[0] for row in cursor.fetchall())
+        
+        # Fetch primary key columns
+        cursor.execute(f"""
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+            WHERE tc.constraint_type = 'PRIMARY KEY'
+              AND tc.table_schema = '{schema}'
+              AND tc.table_name = '{table_name}'
+        """)
+        pk_columns = set(row[0] for row in cursor.fetchall())
+        
+        # Fetch columns with default values
+        cursor.execute(f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = '{schema}'
+              AND table_name   = '{table_name}'
+              AND column_default IS NOT NULL
+        """)
+        default_columns = set(row[0] for row in cursor.fetchall())
     
     cursor.close()
     
@@ -417,7 +422,6 @@ def get_non_essential_columns(conn, table_name: str, schema: str = 'public', cus
     return exclude_columns
 
 def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: str = 'geom', schema: str = 'public', exclude_columns: List[str] = None, args=None):
-    cursor = conn.cursor()
     
     # Get the actual geometry column name from the database
     db_geom_column = get_db_geometry_column(conn, table_name, schema=schema)
@@ -524,15 +528,14 @@ def update_geometries(gdf, table_name, engine, unique_id_column):
 
 def check_geometry_type_constraint(conn, table_name, schema='public'):
     """Check if table has a specific geometry type constraint."""
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT type 
-        FROM geometry_columns 
-        WHERE f_table_schema = %s 
-        AND f_table_name = %s
-    """, (schema, table_name))
-    result = cursor.fetchone()
-    cursor.close()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT type 
+            FROM geometry_columns 
+            WHERE f_table_schema = %s 
+            AND f_table_name = %s
+        """, (schema, table_name))
+        result = cursor.fetchone()
     
     if result and result[0].upper() != 'GEOMETRY':
         return result[0].upper()
@@ -540,181 +543,173 @@ def check_geometry_type_constraint(conn, table_name, schema='public'):
 
 def create_generic_geometry_table(conn, engine, table_name, srid, schema='public'):
     """Create a new table with a generic geometry column and specified SRID."""
-    cursor = conn.cursor()
     try:
-        # Drop table if it exists
-        cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table_name}")
+        with conn.cursor() as cursor:
+            # Drop table if it exists (use quoted identifiers)
+            cursor.execute(f'DROP TABLE IF EXISTS "{schema}"."{table_name}"')
+            
+            # Create table with generic geometry type and SRID (use quoted identifiers)
+            sql = f"""
+            CREATE TABLE "{schema}"."{table_name}" (
+                gid SERIAL PRIMARY KEY,
+                geom geometry(Geometry, {srid})
+            );
+            """
+            cursor.execute(sql)
+            conn.commit()
         
-        # Create table with generic geometry type and SRID
-        sql = f"""
-        CREATE TABLE {schema}.{table_name} (
-            geom geometry(Geometry, {srid})
-        );
-        """
-        cursor.execute(sql)
-        
-        # Add spatial index
+        # Add spatial index after commit
         create_spatial_index(conn, table_name, schema=schema)
         
-        conn.commit()
         logger.info(f"Created new table '{schema}.{table_name}' with generic geometry type (SRID: {srid})")
         return True
     except Exception as e:
         conn.rollback()
         logger.error(f"Error creating table: {e}")
         return False
-    finally:
-        cursor.close()
 
 def append_geometries(conn, engine, gdf, table_name, schema='public'):
     """Append geometries using raw SQL to avoid CRS issues."""
-    cursor = conn.cursor()
     try:
-        # Create temporary table with schema
+        # Create temporary table with schema (use quoted identifiers)
         temp_table = f"temp_{table_name}"
         gdf.to_postgis(
             temp_table,
             engine,
-            schema=schema,  # Specify schema for temp table
+            schema=schema,
             if_exists='replace',
             index=False
         )
         
-        # Copy geometries from temp to main table (schema already in qualified names)
-        cursor.execute(f"""
-            INSERT INTO {schema}.{table_name} (geom)
-            SELECT geom FROM {schema}.{temp_table}
-        """)
-        
-        # Clean up (include schema in drop)
-        cursor.execute(f"DROP TABLE IF EXISTS {schema}.{temp_table}")
-        conn.commit()
+        # Copy geometries from temp to main table (use quoted identifiers)
+        with conn.cursor() as cursor:
+            cursor.execute(f"""
+                INSERT INTO "{schema}"."{table_name}" (geom)
+                SELECT geom FROM "{schema}"."{temp_table}"
+            """)
+            
+            # Clean up
+            cursor.execute(f'DROP TABLE IF EXISTS "{schema}"."{temp_table}"')
+            conn.commit()
         return True
     except Exception as e:
         conn.rollback()
         logger.error(f"Error appending geometries: {e}")
         return False
-    finally:
-        cursor.close()
 
 def process_files(args, conn, engine, existing_tables, schema):
+    logger.debug("Entering process_files...")
     total_new = 0
     total_updated = 0
     total_identical = 0
 
-    # Determine file extensions to process
-    supported_extensions = ['.shp', '.geojson', '.json', '.gpkg', '.kml', '.gml']
-
-    # Collect files to process (only in specified directory, not subdirectories)
-    file_info_list = []
-
-    # List files only in the specified directory
-    for file in os.listdir(args.filepath):
-        if any(file.lower().endswith(ext) for ext in supported_extensions):
-            full_path = os.path.join(args.filepath, file)
-
-            # Skip if not a file (e.g., if it's a directory)
-            if not os.path.isfile(full_path):
-                continue
-
-            table_name = os.path.splitext(file)[0].lower()
-
-            try:
-                gdf = gpd.read_file(full_path)
-
-                # Handle CRS
-                source_crs = gdf.crs
-                if args.epsg:
-                    # User specified an EPSG
-                    if source_crs and source_crs.to_epsg() != args.epsg:
-                        logger.info(f"Reprojecting from EPSG:{source_crs.to_epsg()} to EPSG:{args.epsg}")
-                        gdf.set_crs(source_crs, inplace=True)  # Ensure source CRS is set
-                        gdf = gdf.to_crs(epsg=args.epsg)
-                    else:
-                        gdf.set_crs(epsg=args.epsg, inplace=True)
-                elif not source_crs:
-                    # No source CRS and no user EPSG specified, default to 4326
-                    logger.warning(f"No CRS found in {file}, defaulting to EPSG:4326")
-                    gdf.set_crs(epsg=4326, inplace=True)
-                else:
-                    # Keep source CRS
-                    pass
-
-                input_geom_col = gdf.geometry.name
-                file_info_list.append({
-                    'file': file,
-                    'full_path': full_path,
-                    'table_name': table_name,
-                    'gdf': gdf,
-                    'input_geom_col': input_geom_col
-                })
-            except Exception as e:
-                logger.error(f"[red]Error reading '{file}': {e}[/red]")
-                continue
-
-    if not file_info_list:
-        logger.warning("[red]No spatial files found to process.[/red]")
-        return
-
-    # Identify affected tables
-    affected_tables = identify_affected_tables(file_info_list, args, schema)
-    
-    # Create backups of all affected tables at once
-    if not args.no_backup:
-        backup_info = backup_tables(conn, affected_tables, schema)
-        if backup_info is None:
-            logger.error("Backup creation failed, aborting operation")
-            return
-
-    # Collect geometry column names
-    geom_col_files = defaultdict(list)
-    for info in file_info_list:
-        geom_col_files[info['input_geom_col']].append(info['file'])
-
-    # Handle geometry column renaming
-    for info in file_info_list:
-        gdf = info['gdf']
-        if gdf.geometry.name != 'geom':
-            gdf = gdf.rename_geometry('geom')
-            gdf.set_geometry('geom', inplace=True)
-            gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
-            info['gdf'] = gdf
-            info['input_geom_col'] = 'geom'
-
-    # Define columns to exclude from comparison dynamically
-    exclude_cols = set()
-    for info in file_info_list:
-        table_name = info['table_name']
-        non_essential = get_non_essential_columns(conn, table_name, schema=schema)
-        exclude_cols.update(non_essential)
-    exclude_cols = list(exclude_cols)
-
-    if exclude_cols:
-        logger.debug(f"Columns excluded from comparison: {exclude_cols}")
-    else:
-        logger.debug("No columns excluded from comparison.")
-
-    # Check for geometry type constraint if using --table and table exists
-    if args.table and args.table in existing_tables:
-        geom_type = check_geometry_type_constraint(conn, args.table, schema)
-        if geom_type:
-            logger.error(f"[red]Error: Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.[/red]")
-            logger.error("[yellow]To use this table with mixed geometry types, you need to either:[/yellow]")
-            logger.error("  1. Drop the existing table and let dbfriend create it with a generic geometry type")
-            logger.error("  2. Use a different table name")
-            logger.error("\nExiting to allow you to make this decision.")
-            sys.exit(1)
-
-    # Set search_path before starting transaction
-    cursor = conn.cursor()
-    if args.schema:
-        cursor.execute(f"SET search_path TO {schema}, public;")
-        conn.commit()  # Commit the session setting
-    cursor.close()
-
-    # Begin transaction for all operations
     try:
-        conn.autocommit = False
+        # Start fresh transaction
+        conn.rollback()  # Ensure clean state
+        
+        # Determine file extensions to process
+        supported_extensions = ['.shp', '.geojson', '.json', '.gpkg', '.kml', '.gml']
+        
+        # Collect files to process (only in specified directory, not subdirectories)
+        file_info_list = []
+
+        # List files only in the specified directory
+        for file in os.listdir(args.filepath):
+            if any(file.lower().endswith(ext) for ext in supported_extensions):
+                full_path = os.path.join(args.filepath, file)
+
+                # Skip if not a file (e.g., if it's a directory)
+                if not os.path.isfile(full_path):
+                    continue
+
+                table_name = os.path.splitext(file)[0].lower()
+
+                try:
+                    gdf = gpd.read_file(full_path)
+
+                    # Handle CRS
+                    source_crs = gdf.crs
+                    if args.epsg:
+                        # User specified an EPSG
+                        if source_crs and source_crs.to_epsg() != args.epsg:
+                            logger.info(f"Reprojecting from EPSG:{source_crs.to_epsg()} to EPSG:{args.epsg}")
+                            gdf.set_crs(source_crs, inplace=True)  # Ensure source CRS is set
+                            gdf = gdf.to_crs(epsg=args.epsg)
+                        else:
+                            gdf.set_crs(epsg=args.epsg, inplace=True)
+                    elif not source_crs:
+                        # No source CRS and no user EPSG specified, default to 4326
+                        logger.warning(f"No CRS found in {file}, defaulting to EPSG:4326")
+                        gdf.set_crs(epsg=4326, inplace=True)
+                    else:
+                        # Keep source CRS
+                        pass
+
+                    input_geom_col = gdf.geometry.name
+                    file_info_list.append({
+                        'file': file,
+                        'full_path': full_path,
+                        'table_name': table_name,
+                        'gdf': gdf,
+                        'input_geom_col': input_geom_col
+                    })
+                except Exception as e:
+                    logger.error(f"[red]Error reading '{file}': {e}[/red]")
+                    continue
+
+        if not file_info_list:
+            logger.warning("[red]No spatial files found to process.[/red]")
+            return
+        
+        # Normalize table name if provided
+        if args.table:
+            args.table = args.table.lower()
+
+        # Identify affected tables
+        affected_tables = identify_affected_tables(file_info_list, args, schema)
+        
+        # Create backups of all affected tables at once
+        if not args.no_backup:
+            backup_info = backup_tables(conn, affected_tables, schema)
+            
+        # Collect geometry column names
+        geom_col_files = defaultdict(list)
+        for info in file_info_list:
+            geom_col_files[info['input_geom_col']].append(info['file'])
+
+        # Handle geometry column renaming
+        for info in file_info_list:
+            gdf = info['gdf']
+            if gdf.geometry.name != 'geom':
+                gdf = gdf.rename_geometry('geom')
+                gdf.set_geometry('geom', inplace=True)
+                gdf.set_crs(gdf.crs, inplace=True)  # Preserve CRS
+                info['gdf'] = gdf
+                info['input_geom_col'] = 'geom'
+
+        # Define columns to exclude from comparison dynamically
+        exclude_cols = set()
+        for info in file_info_list:
+            table_name = info['table_name']
+            non_essential = get_non_essential_columns(conn, table_name, schema=schema)
+            exclude_cols.update(non_essential)
+        exclude_cols = list(exclude_cols)
+
+        if exclude_cols:
+            logger.debug(f"Columns excluded from comparison: {exclude_cols}")
+        else:
+            logger.debug("No columns excluded from comparison.")
+
+        # Check for geometry type constraint if using --table and table exists
+        if args.table and args.table in existing_tables:
+            geom_type = check_geometry_type_constraint(conn, args.table, schema)
+            if geom_type:
+                logger.error(f"[red]Error: Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.[/red]")
+                logger.error("[yellow]To use this table with mixed geometry types, you need to either:[/yellow]")
+                logger.error("  1. Drop the existing table and let dbfriend create it with a generic geometry type")
+                logger.error("  2. Use a different table name")
+                logger.error("\nExiting to allow you to make this decision.")
+                sys.exit(1)
 
         # Initialize rich Progress
         with Progress(
@@ -883,17 +878,16 @@ def process_files(args, conn, engine, existing_tables, schema):
                             )
 
                             # Verify the table was created
-                            cursor = conn.cursor()
-                            cursor.execute("""
-                                SELECT EXISTS (
-                                    SELECT 1
-                                    FROM information_schema.tables
-                                    WHERE table_schema = %s
-                                    AND table_name = %s
-                                );
-                            """, (schema, table_name))
-                            table_exists = cursor.fetchone()[0]
-                            cursor.close()
+                            with conn.cursor() as cursor:
+                                cursor.execute("""
+                                    SELECT EXISTS (
+                                        SELECT 1
+                                        FROM information_schema.tables
+                                        WHERE table_schema = %s
+                                        AND table_name = %s
+                                    );
+                                """, (schema, table_name))
+                                table_exists = cursor.fetchone()[0]
 
                             if table_exists:
                                 logger.info(f"Successfully imported {num_geometries} geometries to new table '{qualified_table}'")
@@ -913,7 +907,7 @@ def process_files(args, conn, engine, existing_tables, schema):
 
                 progress.advance(task)
 
-        # Commit everything at once
+        # Single commit at the end
         conn.commit()
         logger.info("All changes committed successfully")
         logger.info("Summary of tasks:\n"
@@ -922,46 +916,41 @@ def process_files(args, conn, engine, existing_tables, schema):
                     f"{format(total_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped")
 
     except Exception as e:
-        conn.rollback()  # Rollback the transaction on error
-        logger.error(f"An error occurred: {e}. All changes have been rolled back.")
-        # Optionally restore from backups here
-    finally:
-        conn.autocommit = True  # Reset autocommit
+        conn.rollback()
+        raise  # Re-raise the exception to be caught by main()
 
 def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
-    cursor = conn.cursor()
-    # Check if the table exists
-    cursor.execute("""
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' AND table_name = %s
-        );
-    """, (table_name,))
-    table_exists = cursor.fetchone()[0]
+    with conn.cursor() as cursor:
+        # Check if the table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = %s
+            );
+        """, (table_name,))
+        table_exists = cursor.fetchone()[0]
 
-    if not table_exists:
-        # Table does not exist, proceed without CRS check
-        cursor.close()
-        return gdf  # Proceed with the current GeoDataFrame
+        if not table_exists:
+            # Table does not exist, proceed without CRS check
+            return gdf  # Proceed with the current GeoDataFrame
 
-    # Table exists, retrieve existing SRID using ST_SRID
-    try:
-        cursor.execute(f"""
-            SELECT ST_SRID("{geom_column}") FROM "{table_name}" WHERE "{geom_column}" IS NOT NULL LIMIT 1;
-        """)
-        result = cursor.fetchone()
-        if result:
-            existing_srid = result[0]
-            logger.info(f"Existing SRID for '{table_name}' is {existing_srid}")
-        else:
-            logger.warning(f"No geometries found in '{table_name}' to determine SRID")
-            existing_srid = None
-    except Exception as e:
-        logger.error(f"Error retrieving SRID for '{table_name}': {e}")
-        conn.rollback()
-        cursor.close()
-        return None  # Skip this file due to error
+        # Table exists, retrieve existing SRID using ST_SRID
+        try:
+            cursor.execute(f"""
+                SELECT ST_SRID("{geom_column}") FROM "{table_name}" WHERE "{geom_column}" IS NOT NULL LIMIT 1;
+            """)
+            result = cursor.fetchone()
+            if result:
+                existing_srid = result[0]
+                logger.info(f"Existing SRID for '{table_name}' is {existing_srid}")
+            else:
+                logger.warning(f"No geometries found in '{table_name}' to determine SRID")
+                existing_srid = None
+        except Exception as e:
+            logger.error(f"Error retrieving SRID for '{table_name}': {e}")
+            conn.rollback()
+            return None  # Skip this file due to error
 
     # Get the SRID of the new data
     new_srid = gdf.crs.to_epsg()
@@ -1005,36 +994,40 @@ def check_crs_compatibility(gdf, conn, table_name, geom_column, args):
 
 def check_schema_exists(conn, schema_name: str) -> bool:
     """Check if the specified schema exists."""
-    cursor = conn.cursor()
-    
-    # Debug: List all available schemas
-    cursor.execute("""
-        SELECT schema_name 
-        FROM information_schema.schemata;
-    """)
-    all_schemas = [row[0] for row in cursor.fetchall()]
-    logger.debug(f"Available schemas: {all_schemas}")
-    
-    # Check for specific schema
-    cursor.execute("""
-        SELECT EXISTS(
-            SELECT 1 
-            FROM information_schema.schemata 
-            WHERE schema_name = %s
-        );
-    """, (schema_name.lower(),))
-    exists = cursor.fetchone()[0]
-    
-    logger.debug(f"Schema check for '{schema_name}': {exists}")
-    logger.debug(f"Current user: {conn.info.user}")
-    logger.debug(f"Current database: {conn.info.dbname}")
-    
-    cursor.close()
-    return exists
+    with conn.cursor() as cursor:
+        # Debug: List all available schemas
+        cursor.execute("""
+            SELECT schema_name 
+            FROM information_schema.schemata;
+        """)
+        all_schemas = [row[0] for row in cursor.fetchall()]
+        logger.debug(f"Available schemas: {all_schemas}")
+        
+        # Check for specific schema
+        cursor.execute("""
+            SELECT EXISTS(
+                SELECT 1 
+                FROM information_schema.schemata 
+                WHERE schema_name = %s
+            );
+        """, (schema_name.lower(),))
+        exists = cursor.fetchone()[0]
+        
+        logger.debug(f"Schema check for '{schema_name}': {exists}")
+        logger.debug(f"Current user: {conn.info.user}")
+        logger.debug(f"Current database: {conn.info.dbname}")
+        
+        return exists
 
 def main():
     args = parse_arguments()
-
+    
+    # Normalize schema and table names immediately after parsing
+    if args.schema:
+        args.schema = args.schema.lower()
+    if args.table:
+        args.table = args.table.lower()
+    
     # Securely handle the password
     password = os.getenv('DB_PASSWORD')
     if not password:
@@ -1050,28 +1043,60 @@ def main():
         sys.exit(1)
     logger.setLevel(numeric_level)
 
-    # Verify schema exists if specified
-    conn = connect_db(args.dbname, args.dbuser, args.host, args.port, args.password)
+    conn = None
     try:
+        logger.debug("Establishing database connection...")
+        conn = psycopg2.connect(
+            dbname=args.dbname,
+            user=args.dbuser,
+            host=args.host,
+            port=args.port,
+            password=args.password
+        )
+        
+        # Start in autocommit mode for session setup
+        conn.autocommit = True
+        logger.info("Database connection established ✓")
+
+        # Handle schema setup while in autocommit mode
         if args.schema:
+            logger.debug(f"Checking schema '{args.schema}'...")
             if not check_schema_exists(conn, args.schema):
                 logger.error(f"[red]Schema '{args.schema}' does not exist. Please create it first.[/red]")
                 sys.exit(1)
             logger.info(f"Using schema '{args.schema}'")
+            
+            logger.debug("Setting search_path...")
+            with conn.cursor() as cursor:
+                cursor.execute(f"SET search_path TO {args.schema}, public;")
             schema = args.schema
         else:
             schema = 'public'
 
-        # Create the engine before starting any transaction
-        engine = create_engine(f'postgresql://{args.dbuser}:{args.password}@{args.host}:{args.port}/{args.dbname}')
+        # Create SQLAlchemy engine with specific isolation level
+        logger.debug("Creating SQLAlchemy engine...")
+        engine = create_engine(
+            f'postgresql://{args.dbuser}:{args.password}@{args.host}:{args.port}/{args.dbname}',
+            isolation_level='READ COMMITTED'  # Changed from AUTOCOMMIT
+        )
 
-        # Continue with normal operation
+        # Switch to transaction mode for the main operations
+        conn.autocommit = False
+
+        logger.debug("Getting existing tables...")
         existing_tables = get_existing_tables(conn, schema=schema)
+
+        logger.debug("Starting file processing...")
         process_files(args, conn, engine, existing_tables, schema)
+
     except Exception as e:
+        if conn and not conn.autocommit:
+            conn.rollback()
         logger.error(f"An unexpected error occurred: {e}")
     finally:
-        conn.close()
+        if conn:
+            logger.debug("Closing database connection...")
+            conn.close()
 
 if __name__ == '__main__':
     main()
