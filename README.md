@@ -14,7 +14,7 @@
 
 **dbfriend** is a command-line tool designed to simplify the loading and synchronization of spatial data into PostGIS databases. It focuses on data integrity and safety, ensuring that your database operations are reliable and efficient. By handling complex tasks intelligently, dbfriend helps GIS professionals and database administrators streamline their workflows.
 
-### Key Features
+### 🚀 Features:
 
 
 - **Transactional Operations for Data Integrity**  
