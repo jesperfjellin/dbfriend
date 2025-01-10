@@ -1,23 +1,28 @@
 #!/usr/bin/env python
 import argparse
-import os
-import sys
-import psycopg2
-from sqlalchemy import create_engine
-import logging
+import datetime
 import getpass
 import hashlib
+import logging
+import os
 import re
-from typing import List, Set
-import pandas as pd
-import geopandas as gpd
-import datetime
-from geopandas import GeoDataFrame
+import subprocess
+import sys
 from collections import defaultdict
+from typing import List
+from typing import Set
+import geopandas as gpd
+import pandas as pd
+import psycopg2
+from geopandas import GeoDataFrame
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
-import subprocess
+from rich.progress import BarColumn
+from rich.progress import Progress
+from rich.progress import SpinnerColumn
+from rich.progress import TextColumn
+from rich.progress import TimeElapsedColumn
+from sqlalchemy import create_engine
 
 # Initialize rich Console
 console = Console(width=100)
