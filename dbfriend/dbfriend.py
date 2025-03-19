@@ -1,4 +1,6 @@
 # TODO: Add options for sync jobs/periodic auto runs
+# TODO: Add support for other file formats
+# TODO: Refactor main
 
 #!/usr/bin/env python
 import argparse
