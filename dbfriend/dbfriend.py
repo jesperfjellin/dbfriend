@@ -1,3 +1,5 @@
+# TODO: Add options for sync jobs/periodic auto runs
+
 #!/usr/bin/env python
 import argparse
 import datetime
