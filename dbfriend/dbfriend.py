@@ -295,7 +295,7 @@ def backup_tables(conn, tables, schema='public', dry_run=False):
     backup_info = {}
     
     if dry_run:
-        logger.info("[yellow][DRY RUN][/yellow] Would create backups for the following tables:")
+        logger.info("[yellow][DRY RUN MODE][/yellow] Would create backups for the following tables:")
         for table in tables:
             if check_table_exists(conn, table.lower(), schema):
                 backup_file = os.path.join(backup_dir, f"{table.lower()}_backup_{timestamp}.sql")
@@ -685,6 +685,43 @@ def check_geometry_type_constraint(conn, table_name, schema='public'):
         return result[0].upper()
     return None
 
+def analyze_geometry_type_compatibility(gdf, conn, table_name, schema='public'):
+    """
+    Analyze compatibility between source data geometry types and table constraints.
+    
+    Args:
+        gdf: GeoDataFrame with source data
+        conn: Database connection
+        table_name: Target table name
+        schema: Database schema
+        
+    Returns:
+        tuple: (is_compatible, table_constraint, source_types, compatibility_message)
+    """
+    # Get table constraint
+    table_constraint = check_geometry_type_constraint(conn, table_name, schema)
+    
+    # Analyze source geometry types
+    source_geom_types = set()
+    for geom in gdf.geometry:
+        if geom is not None:
+            source_geom_types.add(geom.geom_type.upper())
+    
+    # If no constraint or generic constraint, always compatible
+    if not table_constraint or table_constraint == 'GEOMETRY':
+        return True, table_constraint, source_geom_types, "No geometry type constraint or generic constraint"
+    
+    # Check compatibility
+    if len(source_geom_types) == 1:
+        source_type = next(iter(source_geom_types))
+        if source_type == table_constraint:
+            return True, table_constraint, source_geom_types, f"Source {source_type} matches table constraint {table_constraint}"
+        else:
+            return False, table_constraint, source_geom_types, f"Source {source_type} incompatible with table constraint {table_constraint}"
+    else:
+        # Multiple geometry types in source - incompatible with specific constraint
+        return False, table_constraint, source_geom_types, f"Source has mixed types {source_geom_types} incompatible with table constraint {table_constraint}"
+
 def create_generic_geometry_table(conn, engine, table_name, srid, schema='public', dry_run=False):
     """Create a new table with a generic geometry column and specified SRID."""
     if dry_run:
@@ -770,7 +807,7 @@ def process_files(args, conn, engine, existing_tables, schema):
     logger.debug("Entering process_files...")
     
     if args.dry_run:
-        logger.info("[bold yellow][DRY RUN MODE][/bold yellow] - No changes will be made to the database")
+        logger.info("[yellow][DRY RUN MODE][/yellow] - No changes will be made to the database")
     
     total_new = 0
     total_updated = 0
@@ -839,20 +876,43 @@ def process_files(args, conn, engine, existing_tables, schema):
             exclude_cols.update(non_essential)
         exclude_cols = list(exclude_cols)
 
-        # Check geometry type constraint for --table option
+        # Check geometry type constraint for --table option with intelligent compatibility analysis
         if args.table and args.table in existing_tables:
-            geom_type = check_geometry_type_constraint(conn, args.table, schema)
-            if geom_type:
+            # Analyze all files that would go into this table to check compatibility
+            all_compatible = True
+            compatibility_issues = []
+            
+            for info in file_info_list:
+                gdf = info['gdf']
+                is_compatible, table_constraint, source_types, message = analyze_geometry_type_compatibility(
+                    gdf, conn, args.table, schema
+                )
+                
+                if not is_compatible:
+                    all_compatible = False
+                    compatibility_issues.append(f"File '{info['file']}': {message}")
+                else:
+                    logger.debug(f"File '{info['file']}': {message}")
+            
+            # Only error/warn if there are actual compatibility issues
+            if not all_compatible:
                 if args.dry_run:
-                    logger.warning(f"[yellow][DRY RUN WARNING][/yellow] Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.")
-                    logger.warning("[yellow][DRY RUN WARNING][/yellow] In a live run, this would require --overwrite or table recreation to handle mixed geometry types.")
+                    logger.warning(f"[yellow][DRY RUN WARNING][/yellow] Geometry type compatibility issues detected:")
+                    for issue in compatibility_issues:
+                        logger.warning(f"[yellow][DRY RUN WARNING][/yellow]   - {issue}")
+                    logger.warning("[yellow][DRY RUN WARNING][/yellow] In a live run, this would require --overwrite or table recreation.")
                     logger.info("[yellow][DRY RUN][/yellow] Continuing with analysis to show what would happen...")
                 else:
-                    logger.error(f"[red]Error: Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.[/red]")
-                    logger.error("[yellow]To use this table with mixed geometry types, you need to either:[/yellow]")
-                    logger.error("  1. Drop the existing table and let dbfriend create it with a generic geometry type")
-                    logger.error("  2. Use a different table name")
+                    logger.error(f"[red]Geometry type compatibility issues detected:[/red]")
+                    for issue in compatibility_issues:
+                        logger.error(f"[red]  - {issue}[/red]")
+                    logger.error("[yellow]To resolve this, you can either:[/yellow]")
+                    logger.error("  1. Use --overwrite to recreate the table with compatible geometry types")
+                    logger.error("  2. Drop the existing table and let dbfriend create it with a generic geometry type")
+                    logger.error("  3. Use a different table name")
                     sys.exit(1)
+            else:
+                logger.info(f"[green]✓[/green] All source files are compatible with table '{schema}.{args.table}' geometry type constraint")
 
         # Initialize progress bar
         with Progress(
@@ -1030,11 +1090,11 @@ def process_files(args, conn, engine, existing_tables, schema):
             conn.commit()
             logger.info("[green]All changes committed successfully[/green]")
         else:
-            logger.info("[yellow][DRY RUN][/yellow] No changes were made to the database")
+            logger.info("[yellow][DRY RUN MODE][/yellow] No changes were made to the database")
         
         # Print final summary with rich formatting
         action_word = "would be" if args.dry_run else "were"
-        logger.info(f"\n[bold]Summary of operations{' (DRY RUN)' if args.dry_run else ''}:[/bold]\n"
+        logger.info(f"\n[bold]Summary of operations{' [yellow](DRY RUN MODE)[/yellow]' if args.dry_run else ''}:[/bold]\n"
                    f"• {format(total_new, ',').replace(',', ' ')} [green]new[/] geometries {action_word} added\n"
                    f"• {format(total_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries {action_word} modified\n"
                    f"• {format(total_identical, ',').replace(',', ' ')} [red]identical[/] geometries {action_word} skipped")
