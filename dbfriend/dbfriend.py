@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from typing import List
 from typing import Set
@@ -26,6 +27,9 @@ from rich.progress import SpinnerColumn
 from rich.progress import TextColumn
 from rich.progress import TimeElapsedColumn
 from sqlalchemy import create_engine
+import fiona
+import json
+from pathlib import Path
 
 # Initialize rich Console
 console = Console(width=100)
@@ -186,6 +190,7 @@ Options:
     --coordinates     Print coordinates and attributes for each geometry.
     --no-backup       Do not create backups of existing tables before modifying them.
     --dry-run         Show what operations would be performed without actually executing them.
+    --deploy          Monitor directory for new/changed files and automatically import them.
     
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
@@ -227,6 +232,8 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
                        help='Do not create backups of existing tables before modifying them')
     parser.add_argument('--dry-run', action='store_true',
                        help='Show what operations would be performed without actually executing them')
+    parser.add_argument('--deploy', action='store_true',
+                       help='Monitor directory for new/changed files and automatically import them')
 
     return parser.parse_args()
 
@@ -817,43 +824,46 @@ def process_files(args, conn, engine, existing_tables, schema):
         # Start fresh transaction
         conn.rollback()  # Ensure clean state
         
-        # Determine file extensions to process
-        supported_extensions = ['.shp', '.geojson', '.json', '.gpkg', '.kml', '.gml']
         file_info_list = []
 
         # List files only in the specified directory
         for file in os.listdir(args.filepath):
-            if any(file.lower().endswith(ext) for ext in supported_extensions):
-                full_path = os.path.join(args.filepath, file)
-                if not os.path.isfile(full_path):
-                    continue
+            full_path = os.path.join(args.filepath, file)
+            if not os.path.isfile(full_path):
+                continue
+                
+            # Skip the deploy state file specifically
+            if file == '.dbfriend_deploy.json':
+                continue
 
-                table_name = os.path.splitext(file)[0].lower()
-                try:
-                    gdf = gpd.read_file(full_path)
-                    source_crs = gdf.crs
-                    
-                    # Handle CRS
-                    if args.epsg:
-                        if source_crs and source_crs.to_epsg() != args.epsg:
-                            logger.info(f"[yellow]Reprojecting[/] from EPSG:{source_crs.to_epsg()} to EPSG:{args.epsg}")
-                            gdf.set_crs(source_crs, inplace=True)
-                            gdf = gdf.to_crs(epsg=args.epsg)
-                        else:
-                            gdf.set_crs(epsg=args.epsg, inplace=True)
-                    elif not source_crs:
-                        logger.warning(f"No CRS found in {file}, defaulting to [yellow]EPSG:4326[/]")
-                        gdf.set_crs(epsg=4326, inplace=True)
+            table_name = os.path.splitext(file)[0].lower()
+            try:
+                # Try to read the file with geopandas - if it works, it's spatial
+                gdf = gpd.read_file(full_path)
+                source_crs = gdf.crs
+                
+                # Handle CRS
+                if args.epsg:
+                    if source_crs and source_crs.to_epsg() != args.epsg:
+                        logger.info(f"[yellow]Reprojecting[/] from EPSG:{source_crs.to_epsg()} to EPSG:{args.epsg}")
+                        gdf.set_crs(source_crs, inplace=True)
+                        gdf = gdf.to_crs(epsg=args.epsg)
+                    else:
+                        gdf.set_crs(epsg=args.epsg, inplace=True)
+                elif not source_crs:
+                    logger.warning(f"No CRS found in {file}, defaulting to [yellow]EPSG:4326[/]")
+                    gdf.set_crs(epsg=4326, inplace=True)
 
-                    file_info_list.append({
-                        'file': file,
-                        'full_path': full_path,
-                        'table_name': table_name,
-                        'gdf': gdf
-                    })
-                except Exception as e:
-                    logger.error(f"[red]Error reading '{file}': {e}[/red]")
-                    continue
+                file_info_list.append({
+                    'file': file,
+                    'full_path': full_path,
+                    'table_name': table_name,
+                    'gdf': gdf
+                })
+            except Exception as e:
+                # Silently skip files that can't be read as spatial data
+                logger.debug(f"Skipping '{file}' - not a readable spatial file")
+                continue
 
         if not file_info_list:
             logger.warning("[red]No spatial files found to process.[/red]")
@@ -1239,6 +1249,247 @@ def check_schema_exists(conn, schema_name: str) -> bool:
         
         return exists
 
+def is_spatial_file(filepath):
+    """Check if file is processable by geopandas/dbfriend"""
+    try:
+        # Quick test - just try to open without fully reading
+        with fiona.open(filepath) as src:
+            return True
+    except:
+        return False
+
+def scan_directory_for_spatial_files(directory_path):
+    """Scan directory for spatial files and return their metadata."""
+    files_info = {}
+    
+    try:
+        for file_path in Path(directory_path).iterdir():
+            if not file_path.is_file():
+                continue
+                
+            # Skip the deploy state file specifically
+            if file_path.name == '.dbfriend_deploy.json':
+                continue
+                
+            # Try to verify it's actually a spatial file by opening with fiona
+            try:
+                with fiona.open(str(file_path)) as src:
+                    # If we can open it, it's spatial
+                    stat = file_path.stat()
+                    files_info[file_path.name] = {
+                        'size': stat.st_size,
+                        'mtime': stat.st_mtime,
+                        'full_path': str(file_path)
+                    }
+            except:
+                # Silently skip files that can't be opened as spatial
+                continue
+                
+    except Exception as e:
+        logger.error(f"Error scanning directory {directory_path}: {e}")
+    
+    return files_info
+
+def load_deploy_state(state_file_path):
+    """Load the deploy state from JSON file."""
+    try:
+        if os.path.exists(state_file_path):
+            with open(state_file_path, 'r') as f:
+                return json.load(f)
+        else:
+            return {
+                'deploy_started': datetime.datetime.now().isoformat(),
+                'last_scan': None,
+                'files': {}
+            }
+    except Exception as e:
+        logger.error(f"Error loading deploy state: {e}")
+        return {'deploy_started': datetime.datetime.now().isoformat(), 'last_scan': None, 'files': {}}
+
+def save_deploy_state(state_file_path, state_data):
+    """Save the deploy state to JSON file."""
+    try:
+        state_data['last_scan'] = datetime.datetime.now().isoformat()
+        with open(state_file_path, 'w') as f:
+            json.dump(state_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving deploy state: {e}")
+
+def needs_processing(filename, current_size, current_mtime, known_files):
+    """Check if file needs processing based on metadata."""
+    if filename not in known_files.get('files', {}):
+        return True  # New file
+    
+    file_info = known_files['files'][filename]
+    if (file_info.get('size') != current_size or 
+        file_info.get('mtime') != current_mtime):
+        return True  # File changed
+    
+    return False  # No changes
+
+def process_and_update_state(file_info, state_file_path, args, conn, engine, existing_tables, schema):
+    """Process a single file and update the state."""
+    filename = file_info['filename']
+    filepath = file_info['full_path']
+    
+    logger.info(f"[bold]Processing detected file: [cyan]{filename}[/cyan][/bold]")
+    
+    try:
+        # Create a temporary args object for this single file
+        temp_args = argparse.Namespace(**vars(args))
+        temp_args.filepath = os.path.dirname(filepath)
+        
+        # Process just this one file
+        # We'll reuse the existing process_files logic but filter to one file
+        table_name = os.path.splitext(filename)[0].lower()
+        
+        try:
+            gdf = gpd.read_file(filepath)
+            source_crs = gdf.crs
+            
+            # Handle CRS (same logic as process_files)
+            if args.epsg:
+                if source_crs and source_crs.to_epsg() != args.epsg:
+                    logger.info(f"[yellow]Reprojecting[/] from EPSG:{source_crs.to_epsg()} to EPSG:{args.epsg}")
+                    gdf.set_crs(source_crs, inplace=True)
+                    gdf = gdf.to_crs(epsg=args.epsg)
+                else:
+                    gdf.set_crs(epsg=args.epsg, inplace=True)
+            elif not source_crs:
+                logger.warning(f"No CRS found in {filename}, defaulting to [yellow]EPSG:4326[/]")
+                gdf.set_crs(epsg=4326, inplace=True)
+
+            # Process the file (simplified version of process_files logic)
+            target_table = args.table if args.table else table_name
+            qualified_table = f"{schema}.{target_table}"
+            
+            # Handle geometry column naming
+            existing_geom_col = get_db_geometry_column(conn, target_table, schema=schema)
+            target_geom_col = 'geometry' if existing_geom_col == 'geometry' else 'geom'
+            
+            if gdf.geometry.name != target_geom_col:
+                gdf = gdf.rename_geometry(target_geom_col)
+                gdf.set_geometry(target_geom_col, inplace=True)
+                gdf.set_crs(gdf.crs, inplace=True)
+
+            if target_table in existing_tables:
+                # Existing table - append new geometries
+                new_geoms, _, identical_geoms = compare_geometries(
+                    gdf, conn, target_table, target_geom_col, schema=schema, 
+                    exclude_columns=[], args=args
+                )
+                
+                num_new = len(new_geoms) if new_geoms is not None else 0
+                num_identical = len(identical_geoms) if identical_geoms is not None else 0
+                
+                if num_new > 0:
+                    new_geoms.to_postgis(
+                        name=target_table,
+                        con=engine,
+                        schema=schema,
+                        if_exists='append',
+                        index=False
+                    )
+                    logger.info(f"[green]✓[/green] Added {num_new} new geometries to '{qualified_table}'")
+                
+                if num_identical > 0:
+                    logger.info(f"[yellow]→[/yellow] Skipped {num_identical} identical geometries")
+            else:
+                # New table
+                gdf.to_postgis(
+                    name=target_table,
+                    con=engine,
+                    schema=schema,
+                    if_exists='replace',
+                    index=False
+                )
+                create_spatial_index(conn, target_table, schema=schema, geom_column=target_geom_col)
+                existing_tables.append(target_table)
+                logger.info(f"[green]✓[/green] Created new table '{qualified_table}' with {len(gdf)} geometries")
+            
+            conn.commit()
+            status = 'success'
+            error_msg = None
+            
+        except Exception as e:
+            conn.rollback()
+            status = 'failed'
+            error_msg = str(e)
+            logger.error(f"[red]✗[/red] Failed to process {filename}: {e}")
+    
+    except Exception as e:
+        status = 'failed'
+        error_msg = str(e)
+        logger.error(f"[red]✗[/red] Error processing {filename}: {e}")
+    
+    # Update state
+    state_data = load_deploy_state(state_file_path)
+    state_data['files'][filename] = {
+        'size': file_info['size'],
+        'mtime': file_info['mtime'],
+        'last_processed': datetime.datetime.now().isoformat(),
+        'status': status,
+        'error': error_msg
+    }
+    save_deploy_state(state_file_path, state_data)
+
+def deploy_mode(args, conn, engine, existing_tables, schema):
+    """Main deploy mode function."""
+    deploy_file = os.path.join(args.filepath, '.dbfriend_deploy.json')
+    
+    logger.info(f"[bold cyan]🚀 Deploy mode started[/bold cyan]")
+    logger.info(f"[cyan]Monitoring:[/cyan] {args.filepath}")
+    logger.info(f"[cyan]State file:[/cyan] {deploy_file}")
+    logger.info(f"[cyan]Schema:[/cyan] {schema}")
+    if args.table:
+        logger.info(f"[cyan]Target table:[/cyan] {args.table}")
+    logger.info("[yellow]Press Ctrl+C to stop[/yellow]\n")
+    
+    # Initial scan to establish baseline
+    current_files = scan_directory_for_spatial_files(args.filepath)
+    logger.info(f"Found {len(current_files)} spatial files to monitor")
+    
+    try:
+        while True:
+            # Add timestamp log for each scan interval
+            current_timestamp = datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
+            logger.info(f"[dim]{current_timestamp} - dbfriend in deploy mode - starting interval scan...[/dim]")
+            
+            current_files = scan_directory_for_spatial_files(args.filepath)
+            known_files = load_deploy_state(deploy_file)
+            
+            processed_any = False
+            for filename, file_meta in current_files.items():
+                if needs_processing(filename, file_meta['size'], file_meta['mtime'], known_files):
+                    file_info = {
+                        'filename': filename,
+                        'full_path': file_meta['full_path'],
+                        'size': file_meta['size'],
+                        'mtime': file_meta['mtime']
+                    }
+                    process_and_update_state(file_info, deploy_file, args, conn, engine, existing_tables, schema)
+                    processed_any = True
+            
+            if not processed_any:
+                logger.info("[dim]No changes detected in monitored files[/dim]")
+            
+            time.sleep(60)
+            
+    except KeyboardInterrupt:
+        logger.info("\n[yellow]📋 Deploy mode stopped by user[/yellow]")
+        
+        # Show final status
+        state_data = load_deploy_state(deploy_file)
+        total_files = len(state_data.get('files', {}))
+        successful = len([f for f in state_data.get('files', {}).values() if f.get('status') == 'success'])
+        failed = len([f for f in state_data.get('files', {}).values() if f.get('status') == 'failed'])
+        
+        logger.info(f"[bold]Final Status:[/bold] {total_files} files processed")
+        if successful > 0:
+            logger.info(f"[green]✓ {successful} successful[/green]")
+        if failed > 0:
+            logger.info(f"[red]✗ {failed} failed[/red]")
+
 def main():
     args = parse_arguments()
     
@@ -1291,21 +1542,27 @@ def main():
         logger.debug("Creating SQLAlchemy engine...")
         engine = create_engine(
             f'postgresql://{args.dbuser}:{args.password}@{args.host}:{args.port}/{args.dbname}',
-            isolation_level='READ COMMITTED'  # Changed from AUTOCOMMIT
+            isolation_level='READ COMMITTED'
         )
 
-        # Switch to transaction mode for the main operations (unless dry-run)
-        if not args.dry_run:
+        # Switch to transaction mode for the main operations (unless dry-run or deploy)
+        if not args.dry_run and not args.deploy:
             conn.autocommit = False
-        else:
+        elif args.dry_run:
             # Keep autocommit on for dry-run mode since we won't be making changes
             logger.info("[yellow][DRY RUN MODE][/yellow] Database will remain in read-only mode")
 
         logger.debug("Getting existing tables...")
         existing_tables = get_existing_tables(conn, schema=schema)
 
-        logger.debug("Starting file processing...")
-        process_files(args, conn, engine, existing_tables, schema)
+        if args.deploy:
+            # Switch to deploy mode
+            conn.autocommit = False  # Deploy mode needs transactions
+            deploy_mode(args, conn, engine, existing_tables, schema)
+        else:
+            # Regular processing mode
+            logger.debug("Starting file processing...")
+            process_files(args, conn, engine, existing_tables, schema)
 
     except Exception as e:
         if conn and not conn.autocommit and not args.dry_run:
