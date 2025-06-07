@@ -185,6 +185,7 @@ Options:
                       If the table does not exist, it will be created.
     --coordinates     Print coordinates and attributes for each geometry.
     --no-backup       Do not create backups of existing tables before modifying them.
+    --dry-run         Show what operations would be performed without actually executing them.
     
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 """
@@ -224,6 +225,8 @@ Note: Password will be prompted securely or can be set via DB_PASSWORD environme
                        help='Target table name. If specified, all data will be loaded into this table')
     parser.add_argument('--no-backup', action='store_true',
                        help='Do not create backups of existing tables before modifying them')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Show what operations would be performed without actually executing them')
 
     return parser.parse_args()
 
@@ -285,11 +288,19 @@ def manage_old_backups(backup_dir, table_name):
     except Exception as e:
         logger.error(f"Error managing old backups: {e}")
 
-def backup_tables(conn, tables, schema='public'):
+def backup_tables(conn, tables, schema='public', dry_run=False):
     """Create file backups of all affected tables before processing."""
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     backup_dir = os.path.join(os.getcwd(), 'backups')
     backup_info = {}
+    
+    if dry_run:
+        logger.info("[yellow][DRY RUN][/yellow] Would create backups for the following tables:")
+        for table in tables:
+            if check_table_exists(conn, table.lower(), schema):
+                backup_file = os.path.join(backup_dir, f"{table.lower()}_backup_{timestamp}.sql")
+                logger.info(f"  - Would backup '{schema}.{table}' to '{backup_file}'")
+        return backup_info
 
     try:
         # Create backups directory if it doesn't exist
@@ -354,8 +365,13 @@ def backup_tables(conn, tables, schema='public'):
 
     return backup_info
 
-def create_spatial_index(conn, table_name, schema='public', geom_column='geom'):
+def create_spatial_index(conn, table_name, schema='public', geom_column='geom', dry_run=False):
     """Create a spatial index on the geometry column."""
+    if dry_run:
+        safe_index_name = re.sub(r'[^a-zA-Z0-9_]', '_', f"{schema}_{table_name}_{geom_column}_idx")
+        logger.info(f"[yellow][DRY RUN][/yellow] Would create spatial index '{safe_index_name}' on table '{schema}.{table_name}'")
+        return
+    
     try:
         # Validate and quote identifiers
         quoted_schema = quote_identifier(schema)
@@ -577,9 +593,13 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
     
     return new_gdf if not new_gdf.empty else None, None, identical_gdf if not identical_gdf.empty else None
 
-def update_geometries(gdf, table_name, engine, unique_id_column, schema='public'):
+def update_geometries(gdf, table_name, engine, unique_id_column, schema='public', dry_run=False):
     """Update existing geometries in PostGIS table."""
     if gdf is None or gdf.empty:
+        return
+    
+    if dry_run:
+        logger.info(f"[yellow][DRY RUN][/yellow] Would update {len(gdf)} existing geometries in table '{schema}.{table_name}'")
         return
 
     try:
@@ -665,8 +685,13 @@ def check_geometry_type_constraint(conn, table_name, schema='public'):
         return result[0].upper()
     return None
 
-def create_generic_geometry_table(conn, engine, table_name, srid, schema='public'):
+def create_generic_geometry_table(conn, engine, table_name, srid, schema='public', dry_run=False):
     """Create a new table with a generic geometry column and specified SRID."""
+    if dry_run:
+        logger.info(f"[yellow][DRY RUN][/yellow] Would create new table '{schema}.{table_name}' with generic geometry type (SRID: {srid})")
+        logger.info(f"[yellow][DRY RUN][/yellow] Would create spatial index on table '{schema}.{table_name}'")
+        return True
+    
     try:
         quoted_schema = quote_identifier(schema)
         quoted_table = quote_identifier(table_name)
@@ -688,7 +713,7 @@ def create_generic_geometry_table(conn, engine, table_name, srid, schema='public
             conn.commit()
         
         # Add spatial index after commit
-        create_spatial_index(conn, table_name, schema=schema)
+        create_spatial_index(conn, table_name, schema=schema, dry_run=False)
         
         logger.info(f"Created new table '{schema}.{table_name}' with generic geometry type (SRID: {srid})")
         return True
@@ -697,8 +722,12 @@ def create_generic_geometry_table(conn, engine, table_name, srid, schema='public
         logger.error(f"Error creating table: {e}")
         return False
 
-def append_geometries(conn, engine, gdf, table_name, schema='public'):
+def append_geometries(conn, engine, gdf, table_name, schema='public', dry_run=False):
     """Append geometries using raw SQL to avoid CRS issues."""
+    if dry_run:
+        logger.info(f"[yellow][DRY RUN][/yellow] Would append {len(gdf)} geometries to table '{schema}.{table_name}'")
+        return True
+    
     try:
         # Create temporary table with schema (use quoted identifiers)
         temp_table = f"temp_{table_name}"
@@ -739,6 +768,10 @@ def process_files(args, conn, engine, existing_tables, schema):
         schema: Database schema
     """
     logger.debug("Entering process_files...")
+    
+    if args.dry_run:
+        logger.info("[bold yellow][DRY RUN MODE][/bold yellow] - No changes will be made to the database")
+    
     total_new = 0
     total_updated = 0
     total_identical = 0
@@ -796,7 +829,7 @@ def process_files(args, conn, engine, existing_tables, schema):
         # Identify affected tables and create backups
         affected_tables = identify_affected_tables(file_info_list, args, schema)
         if not args.no_backup:
-            backup_tables(conn, affected_tables, schema)
+            backup_tables(conn, affected_tables, schema, dry_run=args.dry_run)
 
         # Define columns to exclude from comparison
         exclude_cols = set()
@@ -810,11 +843,16 @@ def process_files(args, conn, engine, existing_tables, schema):
         if args.table and args.table in existing_tables:
             geom_type = check_geometry_type_constraint(conn, args.table, schema)
             if geom_type:
-                logger.error(f"[red]Error: Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.[/red]")
-                logger.error("[yellow]To use this table with mixed geometry types, you need to either:[/yellow]")
-                logger.error("  1. Drop the existing table and let dbfriend create it with a generic geometry type")
-                logger.error("  2. Use a different table name")
-                sys.exit(1)
+                if args.dry_run:
+                    logger.warning(f"[yellow][DRY RUN WARNING][/yellow] Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.")
+                    logger.warning("[yellow][DRY RUN WARNING][/yellow] In a live run, this would require --overwrite or table recreation to handle mixed geometry types.")
+                    logger.info("[yellow][DRY RUN][/yellow] Continuing with analysis to show what would happen...")
+                else:
+                    logger.error(f"[red]Error: Table '{schema}.{args.table}' has a specific {geom_type} geometry type constraint.[/red]")
+                    logger.error("[yellow]To use this table with mixed geometry types, you need to either:[/yellow]")
+                    logger.error("  1. Drop the existing table and let dbfriend create it with a generic geometry type")
+                    logger.error("  2. Use a different table name")
+                    sys.exit(1)
 
         # Initialize progress bar
         with Progress(
@@ -853,14 +891,14 @@ def process_files(args, conn, engine, existing_tables, schema):
                         
                         if table_name not in existing_tables:
                             srid = args.epsg if args.epsg else (gdf.crs.to_epsg() or 4326)
-                            if create_generic_geometry_table(conn, engine, table_name, srid, schema):
+                            if create_generic_geometry_table(conn, engine, table_name, srid, schema, dry_run=args.dry_run):
                                 existing_tables.append(table_name)
                             else:
                                 continue
 
-                            if append_geometries(conn, engine, gdf, table_name, schema):
+                            if append_geometries(conn, engine, gdf, table_name, schema, dry_run=args.dry_run):
                                 total_new += len(gdf)
-                                logger.info(f"Appended {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '{qualified_table}'")
+                                logger.info(f"{'[DRY RUN] Would append' if args.dry_run else 'Appended'} {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '{qualified_table}'")
                         else:
                             new_geoms, updated_geoms, identical_geoms = compare_geometries(
                                 gdf, conn, table_name, target_geom_col, schema=schema, 
@@ -874,15 +912,16 @@ def process_files(args, conn, engine, existing_tables, schema):
                                       f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries")
                             
                             if new_geoms is not None and not new_geoms.empty:
-                                new_geoms.to_postgis(
-                                    name=table_name,
-                                    con=engine,
-                                    schema=schema,
-                                    if_exists='append',
-                                    index=False
-                                )
+                                if not args.dry_run:
+                                    new_geoms.to_postgis(
+                                        name=table_name,
+                                        con=engine,
+                                        schema=schema,
+                                        if_exists='append',
+                                        index=False
+                                    )
                                 total_new += num_new
-                                logger.info(f"Successfully appended {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
+                                logger.info(f"{'[DRY RUN] Would append' if args.dry_run else 'Successfully appended'} {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
                             
                             if identical_geoms is not None:
                                 total_identical += num_identical
@@ -906,23 +945,25 @@ def process_files(args, conn, engine, existing_tables, schema):
 
                         if num_new > 0:
                             try:
-                                new_geoms.to_postgis(
-                                    name=table_name,
-                                    con=engine,
-                                    schema=schema,
-                                    if_exists='append',
-                                    index=False
-                                )
+                                if not args.dry_run:
+                                    new_geoms.to_postgis(
+                                        name=table_name,
+                                        con=engine,
+                                        schema=schema,
+                                        if_exists='append',
+                                        index=False
+                                    )
                                 total_new += num_new
-                                logger.info(f"Successfully appended {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
+                                logger.info(f"{'[DRY RUN] Would append' if args.dry_run else 'Successfully appended'} {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
                             except Exception as e:
-                                logger.error(f"[red]Error appending new geometries: {e}[/red]")
+                                if not args.dry_run:
+                                    logger.error(f"[red]Error appending new geometries: {e}[/red]")
 
                         if num_updated > 0:
                             update_geometries(updated_geoms, table_name, engine, 
-                                           unique_id_column='osm_id', schema=schema)
+                                           unique_id_column='osm_id', schema=schema, dry_run=args.dry_run)
                             total_updated += num_updated
-                            logger.info(f"Successfully updated {format(num_updated, ',').replace(',', ' ')} [yellow]existing[/] geometries")
+                            logger.info(f"{'[DRY RUN] Would update' if args.dry_run else 'Successfully updated'} {format(num_updated, ',').replace(',', ' ')} [yellow]existing[/] geometries")
 
                         total_identical += num_identical
 
@@ -935,38 +976,44 @@ def process_files(args, conn, engine, existing_tables, schema):
                                 print_geometry_details(row, "NEW", args.coordinates)
 
                         try:
-                            with conn.cursor() as cursor:
-                                # Safely create new table using parameterized query
-                                quoted_schema = quote_identifier(schema)
-                                quoted_table = quote_identifier(table_name)
-                                quoted_geom = quote_identifier(target_geom_col)
-                                
-                                gdf.to_postgis(
-                                    name=table_name,
-                                    con=engine,
-                                    schema=schema,
-                                    if_exists='replace',
-                                    index=False
-                                )
+                            if args.dry_run:
+                                logger.info(f"[yellow][DRY RUN][/yellow] Would create new table '[cyan]{qualified_table}[/]'")
+                                logger.info(f"[yellow][DRY RUN][/yellow] Would import {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '[cyan]{qualified_table}[/]'")
+                                logger.info(f"[yellow][DRY RUN][/yellow] Would create spatial index on table '{qualified_table}'")
+                                total_new += len(gdf)
+                            else:
+                                with conn.cursor() as cursor:
+                                    # Safely create new table using parameterized query
+                                    quoted_schema = quote_identifier(schema)
+                                    quoted_table = quote_identifier(table_name)
+                                    quoted_geom = quote_identifier(target_geom_col)
+                                    
+                                    gdf.to_postgis(
+                                        name=table_name,
+                                        con=engine,
+                                        schema=schema,
+                                        if_exists='replace',
+                                        index=False
+                                    )
 
-                                # Verify table creation
-                                cursor.execute("""
-                                    SELECT EXISTS (
-                                        SELECT 1
-                                        FROM information_schema.tables
-                                        WHERE table_schema = %s
-                                        AND table_name = %s
-                                    );
-                                """, (schema, table_name))
-                                
-                                if cursor.fetchone()[0]:
-                                    create_spatial_index(conn, table_name, schema=schema, 
-                                                      geom_column=target_geom_col)
-                                    existing_tables.append(table_name)
-                                    total_new += len(gdf)
-                                    logger.info(f"Successfully imported {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '[cyan]{qualified_table}[/]'")
-                                else:
-                                    logger.error(f"[red]Failed to create table '{qualified_table}'[/red]")
+                                    # Verify table creation
+                                    cursor.execute("""
+                                        SELECT EXISTS (
+                                            SELECT 1
+                                            FROM information_schema.tables
+                                            WHERE table_schema = %s
+                                            AND table_name = %s
+                                        );
+                                    """, (schema, table_name))
+                                    
+                                    if cursor.fetchone()[0]:
+                                        create_spatial_index(conn, table_name, schema=schema, 
+                                                          geom_column=target_geom_col)
+                                        existing_tables.append(table_name)
+                                        total_new += len(gdf)
+                                        logger.info(f"Successfully imported {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '[cyan]{qualified_table}[/]'")
+                                    else:
+                                        logger.error(f"[red]Failed to create table '{qualified_table}'[/red]")
 
                         except Exception as e:
                             logger.error(f"[red]Error importing '{file}': {e}[/red]")
@@ -978,18 +1025,23 @@ def process_files(args, conn, engine, existing_tables, schema):
 
                 progress.advance(task)
 
-        # Commit all changes
-        conn.commit()
-        logger.info("[green]All changes committed successfully[/green]")
+        # Commit all changes (unless in dry-run mode)
+        if not args.dry_run:
+            conn.commit()
+            logger.info("[green]All changes committed successfully[/green]")
+        else:
+            logger.info("[yellow][DRY RUN][/yellow] No changes were made to the database")
         
         # Print final summary with rich formatting
-        logger.info("\n[bold]Summary of operations:[/bold]\n"
-                   f"• {format(total_new, ',').replace(',', ' ')} [green]new[/] geometries added\n"
-                   f"• {format(total_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries\n"
-                   f"• {format(total_identical, ',').replace(',', ' ')} [red]identical[/] geometries skipped")
+        action_word = "would be" if args.dry_run else "were"
+        logger.info(f"\n[bold]Summary of operations{' (DRY RUN)' if args.dry_run else ''}:[/bold]\n"
+                   f"• {format(total_new, ',').replace(',', ' ')} [green]new[/] geometries {action_word} added\n"
+                   f"• {format(total_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries {action_word} modified\n"
+                   f"• {format(total_identical, ',').replace(',', ' ')} [red]identical[/] geometries {action_word} skipped")
 
     except Exception as e:
-        conn.rollback()
+        if not args.dry_run:
+            conn.rollback()
         logger.error(f"[red]An error occurred: {e}[/red]")
         raise
 
@@ -1182,8 +1234,12 @@ def main():
             isolation_level='READ COMMITTED'  # Changed from AUTOCOMMIT
         )
 
-        # Switch to transaction mode for the main operations
-        conn.autocommit = False
+        # Switch to transaction mode for the main operations (unless dry-run)
+        if not args.dry_run:
+            conn.autocommit = False
+        else:
+            # Keep autocommit on for dry-run mode since we won't be making changes
+            logger.info("[yellow][DRY RUN MODE][/yellow] Database will remain in read-only mode")
 
         logger.debug("Getting existing tables...")
         existing_tables = get_existing_tables(conn, schema=schema)
@@ -1192,7 +1248,7 @@ def main():
         process_files(args, conn, engine, existing_tables, schema)
 
     except Exception as e:
-        if conn and not conn.autocommit:
+        if conn and not conn.autocommit and not args.dry_run:
             conn.rollback()
         logger.error(f"An unexpected error occurred: {e}")
     finally:
