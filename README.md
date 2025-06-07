@@ -59,7 +59,7 @@ dbfriend accepts a series of positional arguments and flags. Running dbfriend --
 
 ```
 Usage:
-    dbfriend <username> <dbname> <filepath>
+    dbfriend <username> <dbname> <filepath> [options]
 
 Positional Arguments:
     <username>    Database user
@@ -75,12 +75,15 @@ Options:
     --epsg            Target EPSG code for the data. If not specified, will preserve source CRS
                       or default to 4326.
     --schema          Target schema name. If specified, all data will be loaded into this schema.
-                      If the schema does not exist, dbfriend will not generate one for safety reasons.
-    --table           Target table name. If specified, all data will be loaded into this table. 
+                      If the schema does not exist, dbfriend will not generate one for
+                      safety reasons.
+    --table           Target table name. If specified, all data will be loaded into this table.
                       If the table does not exist, it will be created.
     --coordinates     Print coordinates and attributes for each geometry.
     --no-backup       Do not create backups of existing tables before modifying them.
-
+    --dry-run         Show what operations would be performed without actually executing them.
+    --deploy          Monitor directory for new/changed files and automatically import them.
+    
 Note: Password will be prompted securely or can be set via DB_PASSWORD environment variable.
 ```
 
