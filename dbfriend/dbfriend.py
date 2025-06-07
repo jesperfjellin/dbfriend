@@ -1,4 +1,3 @@
-# TODO: Add options for sync jobs/periodic auto runs
 # TODO: Refactor dbfriend.py into modular files
 
 #!/usr/bin/env python
@@ -453,8 +452,70 @@ def check_table_exists(conn, table_name, schema='public'):
     return exists
 
 def compute_geom_hash(geometry):
+    """Compute hash for geometry coordinates only (for backward compatibility)."""
     wkb = geometry.wkb
     return hashlib.md5(wkb).hexdigest()
+
+def compute_attributes_hash(row, exclude_columns=None, geom_column='geom'):
+    """
+    Compute hash for all non-geometry attributes.
+    
+    Args:
+        row: DataFrame row or dictionary
+        exclude_columns: List of columns to exclude from hashing
+        geom_column: Name of geometry column to exclude
+        
+    Returns:
+        MD5 hash of concatenated attribute values
+    """
+    if exclude_columns is None:
+        exclude_columns = []
+    
+    # Convert row to dict if it's a pandas Series
+    if hasattr(row, 'to_dict'):
+        attr_dict = row.to_dict()
+    else:
+        attr_dict = dict(row)
+    
+    # Exclude geometry and specified columns
+    attrs_to_hash = {}
+    for key, value in attr_dict.items():
+        if (key not in exclude_columns and 
+            key != geom_column and 
+            key != 'geometry' and
+            not key.endswith('_hash')):  # Don't include our hash columns
+            # Convert to string for consistent hashing
+            attrs_to_hash[key] = str(value) if value is not None else 'NULL'
+    
+    # Sort by key for consistent hashing regardless of dict order
+    sorted_attrs = sorted(attrs_to_hash.items())
+    attrs_string = '|'.join([f"{k}:{v}" for k, v in sorted_attrs])
+    
+    return hashlib.md5(attrs_string.encode('utf-8')).hexdigest()
+
+def compute_composite_hash(row, geom_column='geom', exclude_columns=None):
+    """
+    Compute composite hash including both geometry and attributes.
+    
+    Args:
+        row: DataFrame row containing geometry and attributes
+        geom_column: Name of geometry column
+        exclude_columns: List of columns to exclude from attribute hashing
+        
+    Returns:
+        MD5 hash combining geometry and attributes
+    """
+    geom = row[geom_column] if geom_column in row else row.get('geometry')
+    if geom is None:
+        geom_hash = 'NULL'
+    else:
+        geom_hash = compute_geom_hash(geom)
+    
+    attr_hash = compute_attributes_hash(row, exclude_columns, geom_column)
+    
+    # Combine geometry and attribute hashes
+    composite_string = f"geom:{geom_hash}|attrs:{attr_hash}"
+    return hashlib.md5(composite_string.encode('utf-8')).hexdigest()
 
 def get_non_essential_columns(conn, table_name: str, schema: str = 'public', custom_patterns: List[str] = None) -> Set[str]:
     """
@@ -546,7 +607,21 @@ def get_non_essential_columns(conn, table_name: str, schema: str = 'public', cus
     
     return exclude_columns
 
-def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: str = 'geom', schema: str = 'public', exclude_columns: List[str] = None, args=None):
+def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: str = 'geom', schema: str = 'public', exclude_columns: List[str] = None, args=None, engine=None):
+    """
+    Compare geometries and attributes between source data and database.
+    
+    This function now performs comprehensive comparison including:
+    1. Composite hash comparison (geometry + attributes) to detect truly identical features
+    2. Geometry-only hash comparison to detect potential updates vs new features
+    3. Attribute comparison to identify what type of change occurred
+    
+    Returns:
+        tuple: (new_gdf, updated_gdf, identical_gdf)
+            - new_gdf: Completely new features (new geometry + new attributes)
+            - updated_gdf: Existing features with changes (geometry or attribute changes)  
+            - identical_gdf: Features with no changes at all
+    """
     # Get the actual geometry column name from the database
     db_geom_column = get_db_geometry_column(conn, table_name, schema=schema)
     if not db_geom_column:
@@ -562,56 +637,185 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
         logger.error(f"Invalid identifier in compare_geometries: {e}")
         return None, None, None
 
-    sql = f"""
-    SELECT MD5(ST_AsBinary({quoted_geom_col})) as geom_hash
-    FROM {quoted_schema}.{quoted_table}
-    """
+    if exclude_columns is None:
+        exclude_columns = []
+
+    # Get all existing data from database for comprehensive comparison
+    try:
+        # First, get the column names from the database
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (schema, table_name))
+            db_columns = {row[0]: row[1] for row in cur.fetchall()}
+        
+        # Build SQL to get all data including computed hashes
+        non_geom_columns = [col for col in db_columns.keys() if col != db_geom_column]
+        
+        # Quote all column names for the SELECT
+        quoted_columns = []
+        for col in non_geom_columns:
+            try:
+                quoted_columns.append(quote_identifier(col))
+            except ValueError:
+                logger.warning(f"Skipping column with invalid name: {col}")
+                continue
+        
+        columns_sql = ", ".join(quoted_columns) if quoted_columns else "1"
+        
+        sql = f"""
+        SELECT 
+            {columns_sql},
+            MD5(ST_AsBinary({quoted_geom_col})) as geom_hash,
+            ST_AsText({quoted_geom_col}) as geom_wkt
+        FROM {quoted_schema}.{quoted_table}
+        """
+        
+        # Execute and get all existing data
+        import pandas as pd
+        # Use SQLAlchemy engine if available to avoid pandas warning
+        if engine is not None:
+            existing_df = pd.read_sql(sql, engine)
+        else:
+            existing_df = pd.read_sql(sql, conn)
+        
+        if existing_df.empty:
+            # No existing data, everything is new
+            logger.debug("No existing data in table, treating all as new")
+            return gdf, None, None
+            
+    except Exception as e:
+        logger.error(f"Error reading existing data from '{schema}.{table_name}': {e}")
+        return None, None, None
+
+    # Compute hashes for existing data (attributes only, since we have geom_hash)
+    existing_df['attr_hash'] = existing_df.apply(
+        lambda row: compute_attributes_hash(row, exclude_columns + ['geom_hash', 'geom_wkt'], db_geom_column), 
+        axis=1
+    )
+    existing_df['composite_hash'] = existing_df.apply(
+        lambda row: hashlib.md5(f"geom:{row['geom_hash']}|attrs:{row['attr_hash']}".encode('utf-8')).hexdigest(),
+        axis=1
+    )
+
+    # Create lookup sets for fast comparison
+    existing_geom_hashes = set(existing_df['geom_hash'])
+    existing_composite_hashes = set(existing_df['composite_hash'])
     
-    # Get existing geometry hashes from database
-    existing_hashes = set()
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        for row in cur.fetchall():
-            existing_hashes.add(row[0])
-    
-    # Create temporary copy of GDF for comparison
+    # Create lookup dict for finding potential updates by geometry hash
+    geom_to_attrs = {}
+    for _, row in existing_df.iterrows():
+        geom_hash = row['geom_hash']
+        if geom_hash not in geom_to_attrs:
+            geom_to_attrs[geom_hash] = []
+        geom_to_attrs[geom_hash].append(row['attr_hash'])
+
+    # Process new data
     comparison_gdf = gdf.copy()
     comparison_gdf['geom_hash'] = comparison_gdf[geom_column].apply(compute_geom_hash)
-    
-    # Compare with database hashes
-    new_geometries = []
-    identical_geometries = []
-    
-    for idx, row in comparison_gdf.iterrows():
-        geom_hash = row['geom_hash']
-        if geom_hash in existing_hashes:
-            identical_geometries.append(row)
-        else:
-            new_geometries.append(row)
-    
-    # Convert lists to GeoDataFrames
-    new_gdf = GeoDataFrame(new_geometries, geometry=geom_column, crs=gdf.crs) if new_geometries else GeoDataFrame(columns=gdf.columns)
-    identical_gdf = GeoDataFrame(identical_geometries, geometry=geom_column, crs=gdf.crs) if identical_geometries else GeoDataFrame(columns=gdf.columns)
-    
-    # Remove temporary hash column
-    for gdf_temp in [new_gdf, identical_gdf]:
-        if 'geom_hash' in gdf_temp.columns:
-            gdf_temp.drop('geom_hash', axis=1, inplace=True)
-    
-    return new_gdf if not new_gdf.empty else None, None, identical_gdf if not identical_gdf.empty else None
+    comparison_gdf['attr_hash'] = comparison_gdf.apply(
+        lambda row: compute_attributes_hash(row, exclude_columns, geom_column), 
+        axis=1
+    )
+    comparison_gdf['composite_hash'] = comparison_gdf.apply(
+        lambda row: compute_composite_hash(row, geom_column, exclude_columns),
+        axis=1
+    )
 
-def update_geometries(gdf, table_name, engine, unique_id_column, schema='public', dry_run=False):
-    """Update existing geometries in PostGIS table."""
+    # Categorize each feature
+    new_features = []
+    updated_features = []
+    identical_features = []
+
+    for idx, row in comparison_gdf.iterrows():
+        composite_hash = row['composite_hash']
+        geom_hash = row['geom_hash']
+        attr_hash = row['attr_hash']
+        
+        if composite_hash in existing_composite_hashes:
+            # Exact match (geometry + attributes) - truly identical
+            identical_features.append(row)
+            
+        elif geom_hash in existing_geom_hashes:
+            # Same geometry exists but different composite hash
+            # This could be:
+            # 1. Attribute change on existing geometry
+            # 2. Same geometry with different attributes (multiple features)
+            
+            existing_attr_hashes = geom_to_attrs.get(geom_hash, [])
+            if attr_hash not in existing_attr_hashes:
+                # This is an update - same geometry, different attributes
+                updated_features.append(row)
+                logger.debug(f"Detected update: same geometry, different attributes")
+            else:
+                # This shouldn't happen if composite hash is working correctly
+                logger.warning(f"Hash logic inconsistency detected for feature at index {idx}")
+                identical_features.append(row)
+                
+        else:
+            # New geometry (regardless of attributes)
+            new_features.append(row)
+
+    # Convert to GeoDataFrames and clean up
+    def create_clean_gdf(features, original_gdf):
+        if not features:
+            return None
+        gdf_result = GeoDataFrame(features, geometry=geom_column, crs=original_gdf.crs)
+        # Remove our temporary hash columns
+        hash_cols = ['geom_hash', 'attr_hash', 'composite_hash']
+        for col in hash_cols:
+            if col in gdf_result.columns:
+                gdf_result.drop(col, axis=1, inplace=True)
+        return gdf_result
+
+    new_gdf = create_clean_gdf(new_features, gdf)
+    updated_gdf = create_clean_gdf(updated_features, gdf) 
+    identical_gdf = create_clean_gdf(identical_features, gdf)
+
+    # Log detailed comparison results
+    logger.debug(f"Comparison results for '{schema}.{table_name}':")
+    logger.debug(f"  - New features: {len(new_features)}")
+    logger.debug(f"  - Updated features: {len(updated_features)}")
+    logger.debug(f"  - Identical features: {len(identical_features)}")
+
+    return new_gdf, updated_gdf, identical_gdf
+
+def update_geometries(gdf, table_name, engine, conn, schema='public', dry_run=False):
+    """
+    Update existing features in PostGIS table.
+    
+    This function now handles updates more intelligently by:
+    1. Identifying features to update based on geometry hash matching
+    2. Replacing the matched features completely (handles both attribute and geometry changes)
+    3. Using spatial operations when no unique ID is available
+    
+    Args:
+        gdf: GeoDataFrame with updated features
+        table_name: Target table name
+        engine: SQLAlchemy engine
+        conn: Database connection
+        schema: Database schema
+        dry_run: Whether to simulate the operation
+    """
     if gdf is None or gdf.empty:
         return
     
     if dry_run:
-        logger.info(f"[yellow][DRY RUN][/yellow] Would update {len(gdf)} existing geometries in table '{schema}.{table_name}'")
+        logger.info(f"[yellow][DRY RUN][/yellow] Would update {len(gdf)} existing features in table '{schema}.{table_name}'")
         return
 
     try:
+        # Get the actual geometry column name from the database
+        db_geom_column = get_db_geometry_column(conn, table_name, schema=schema)
+        if not db_geom_column:
+            logger.error(f"No geometry column found in table '{schema}.{table_name}'")
+            return
+
         # Create temporary table for updates
-        temp_table = f"temp_{table_name}"
+        temp_table = f"temp_update_{table_name}"
         gdf.to_postgis(
             name=temp_table,
             con=engine,
@@ -623,60 +827,111 @@ def update_geometries(gdf, table_name, engine, unique_id_column, schema='public'
         with engine.connect() as connection:
             from sqlalchemy import text
             
-            # Get existing columns using parameterized query
+            # Quote identifiers
+            quoted_schema = quote_identifier(schema)
+            quoted_table = quote_identifier(table_name)
+            quoted_temp = quote_identifier(temp_table)
+            quoted_geom_col = quote_identifier(db_geom_column)
+            
+            # Get target geometry column in temp table
+            target_geom_col = gdf.geometry.name
+            quoted_target_geom = quote_identifier(target_geom_col)
+            
+            # First, identify features to update by finding matches between geometry hashes
+            # This handles the case where the same geometry exists but with different attributes
+            
+            # Delete existing features that match the geometry hash of incoming features
+            delete_sql = text(f"""
+                DELETE FROM {quoted_schema}.{quoted_table} 
+                WHERE MD5(ST_AsBinary({quoted_geom_col})) IN (
+                    SELECT DISTINCT MD5(ST_AsBinary({quoted_target_geom}))
+                    FROM {quoted_schema}.{quoted_temp}
+                )
+            """)
+            
+            result = connection.execute(delete_sql)
+            deleted_count = result.rowcount
+            logger.debug(f"Deleted {deleted_count} existing features that will be replaced")
+            
+            # Insert all the updated features
+            # Get column names from temp table
             cursor = connection.execute(text("""
-                SELECT column_name 
+                SELECT column_name, data_type
+                FROM information_schema.columns 
+                WHERE table_schema = :schema AND table_name = :temp_table
+                ORDER BY ordinal_position
+            """), {"schema": schema, "temp_table": temp_table})
+            temp_columns = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Get column names from main table
+            cursor = connection.execute(text("""
+                SELECT column_name, data_type
                 FROM information_schema.columns 
                 WHERE table_schema = :schema AND table_name = :table_name
+                ORDER BY ordinal_position
             """), {"schema": schema, "table_name": table_name})
-            existing_columns = {row[0] for row in cursor}
+            main_columns = {row[0]: row[1] for row in cursor.fetchall()}
             
             # Add any new columns to the main table
-            for col in gdf.columns:
-                if col not in existing_columns:
-                    # Determine column type from GeoDataFrame
-                    dtype = gdf[col].dtype
+            for col, data_type in temp_columns.items():
+                if col not in main_columns:
+                    # Map pandas/geopandas types to SQL types
                     sql_type = {
                         'object': 'TEXT',
-                        'int64': 'INTEGER',
-                        'float64': 'DOUBLE PRECISION'
-                    }.get(str(dtype), 'TEXT')
+                        'int64': 'INTEGER', 
+                        'float64': 'DOUBLE PRECISION',
+                        'bool': 'BOOLEAN',
+                        'datetime64[ns]': 'TIMESTAMP'
+                    }.get(str(gdf[col].dtype) if col in gdf.columns else 'object', 'TEXT')
                     
                     quoted_col = quote_identifier(col)
-                    quoted_table = quote_identifier(table_name)
-                    quoted_schema = quote_identifier(schema)
-                    
                     logger.info(f"Adding new column '{col}' with type {sql_type}")
                     connection.execute(text(f"""
                         ALTER TABLE {quoted_schema}.{quoted_table} 
                         ADD COLUMN IF NOT EXISTS {quoted_col} {sql_type}
                     """))
             
-            # Build update statement with proper quoting
-            quoted_schema = quote_identifier(schema)
-            quoted_table = quote_identifier(table_name)
-            quoted_temp = quote_identifier(temp_table)
-            quoted_id = quote_identifier(unique_id_column)
+            # Insert the updated features
+            # Build column list for INSERT (only columns that exist in both tables)
+            common_columns = []
+            for col in temp_columns:
+                if col in main_columns or col in temp_columns:  # Column exists or was just added
+                    try:
+                        quoted_col = quote_identifier(col)
+                        common_columns.append(quoted_col)
+                    except ValueError:
+                        logger.warning(f"Skipping column with invalid name: {col}")
+                        continue
             
-            update_cols = ", ".join([
-                f"{quote_identifier(col)} = s.{quote_identifier(col)}"
-                for col in gdf.columns if col != unique_id_column
-            ])
+            if common_columns:
+                columns_str = ", ".join(common_columns)
+                insert_sql = text(f"""
+                    INSERT INTO {quoted_schema}.{quoted_table} ({columns_str})
+                    SELECT {columns_str}
+                    FROM {quoted_schema}.{quoted_temp}
+                """)
+                
+                result = connection.execute(insert_sql)
+                inserted_count = result.rowcount
+                logger.debug(f"Inserted {inserted_count} updated features")
             
-            sql = text(f"""
-                UPDATE {quoted_schema}.{quoted_table} t
-                SET {update_cols}
-                FROM {quoted_schema}.{quoted_temp} s
-                WHERE t.{quoted_id} = s.{quoted_id}
-            """)
-            
-            connection.execute(sql)
+            # Clean up temporary table
             connection.execute(text(f'DROP TABLE IF EXISTS {quoted_schema}.{quoted_temp}'))
             connection.commit()
         
-        logger.info(f"Successfully updated {len(gdf)} geometries in {table_name}")
+        logger.info(f"Successfully updated {len(gdf)} features in {table_name}")
+        
     except Exception as e:
-        logger.error(f"Error updating geometries: {e}")
+        logger.error(f"Error updating features: {e}")
+        # Clean up temp table on error
+        try:
+            with engine.connect() as connection:
+                quoted_schema = quote_identifier(schema)
+                quoted_temp = quote_identifier(f"temp_update_{table_name}")
+                connection.execute(text(f'DROP TABLE IF EXISTS {quoted_schema}.{quoted_temp}'))
+                connection.commit()
+        except:
+            pass
 
 def check_geometry_type_constraint(conn, table_name, schema='public'):
     with conn.cursor() as cursor:
@@ -968,33 +1223,40 @@ def process_files(args, conn, engine, existing_tables, schema):
 
                             if append_geometries(conn, engine, gdf, table_name, schema, dry_run=args.dry_run):
                                 total_new += len(gdf)
-                                logger.info(f"{'[DRY RUN] Would append' if args.dry_run else 'Appended'} {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '{qualified_table}'")
+                                logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would append' if args.dry_run else 'Appended'} {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '{qualified_table}'")
                         else:
-                            new_geoms, updated_geoms, identical_geoms = compare_geometries(
-                                gdf, conn, table_name, target_geom_col, schema=schema, 
-                                exclude_columns=[], args=args
-                            )
-                            
-                            num_new = len(new_geoms) if new_geoms is not None else 0
-                            num_identical = len(identical_geoms) if identical_geoms is not None else 0
+                                                    new_geoms, updated_geoms, identical_geoms = compare_geometries(
+                            gdf, conn, table_name, target_geom_col, schema=schema, 
+                            exclude_columns=[], args=args, engine=engine
+                        )
+                        
+                        num_new = len(new_geoms) if new_geoms is not None else 0
+                        num_updated = len(updated_geoms) if updated_geoms is not None else 0
+                        num_identical = len(identical_geoms) if identical_geoms is not None else 0
 
-                            logger.info(f"Found {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries and "
-                                      f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries")
-                            
-                            if new_geoms is not None and not new_geoms.empty:
-                                if not args.dry_run:
-                                    new_geoms.to_postgis(
-                                        name=table_name,
-                                        con=engine,
-                                        schema=schema,
-                                        if_exists='append',
-                                        index=False
-                                    )
-                                total_new += num_new
-                                logger.info(f"{'[DRY RUN] Would append' if args.dry_run else 'Successfully appended'} {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
-                            
-                            if identical_geoms is not None:
-                                total_identical += num_identical
+                        logger.info(f"Found {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries, "
+                                  f"{format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries, and "
+                                  f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries")
+                        
+                        if new_geoms is not None and not new_geoms.empty:
+                            if not args.dry_run:
+                                new_geoms.to_postgis(
+                                    name=table_name,
+                                    con=engine,
+                                    schema=schema,
+                                    if_exists='append',
+                                    index=False
+                                )
+                            total_new += num_new
+                            logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would append' if args.dry_run else 'Successfully appended'} {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
+                        
+                        if updated_geoms is not None and not updated_geoms.empty:
+                            update_geometries(updated_geoms, table_name, engine, conn, schema=schema, dry_run=args.dry_run)
+                            total_updated += num_updated
+                            logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would update' if args.dry_run else 'Successfully updated'} {format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries")
+                        
+                        if identical_geoms is not None:
+                            total_identical += num_identical
                     
                     elif table_name in existing_tables:
                         # Handle existing table without --table option
@@ -1002,7 +1264,7 @@ def process_files(args, conn, engine, existing_tables, schema):
                         
                         new_geoms, updated_geoms, identical_geoms = compare_geometries(
                             gdf, conn, table_name, target_geom_col, schema=schema,
-                            exclude_columns=exclude_cols, args=args
+                            exclude_columns=exclude_cols, args=args, engine=engine
                         )
 
                         num_new = len(new_geoms) if new_geoms is not None else 0
@@ -1030,10 +1292,9 @@ def process_files(args, conn, engine, existing_tables, schema):
                                     logger.error(f"[red]Error appending new geometries: {e}[/red]")
 
                         if num_updated > 0:
-                            update_geometries(updated_geoms, table_name, engine, 
-                                           unique_id_column='osm_id', schema=schema, dry_run=args.dry_run)
+                            update_geometries(updated_geoms, table_name, engine, conn, schema=schema, dry_run=args.dry_run)
                             total_updated += num_updated
-                            logger.info(f"{'[DRY RUN] Would update' if args.dry_run else 'Successfully updated'} {format(num_updated, ',').replace(',', ' ')} [yellow]existing[/] geometries")
+                            logger.info(f"{'[DRY RUN] Would update' if args.dry_run else 'Successfully updated'} {format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries")
 
                         total_identical += num_identical
 
@@ -1047,9 +1308,9 @@ def process_files(args, conn, engine, existing_tables, schema):
 
                         try:
                             if args.dry_run:
-                                logger.info(f"[yellow][DRY RUN][/yellow] Would create new table '[cyan]{qualified_table}[/]'")
-                                logger.info(f"[yellow][DRY RUN][/yellow] Would import {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '[cyan]{qualified_table}[/]'")
-                                logger.info(f"[yellow][DRY RUN][/yellow] Would create spatial index on table '{qualified_table}'")
+                                logger.info(f"[yellow][DRY RUN MODE][/yellow] Would create new table '[cyan]{qualified_table}[/]'")
+                                logger.info(f"[yellow][DRY RUN MODE][/yellow] Would import {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '[cyan]{qualified_table}[/]'")
+                                logger.info(f"[yellow][DRY RUN MODE][/yellow] Would create spatial index on table '{qualified_table}'")
                                 total_new += len(gdf)
                             else:
                                 with conn.cursor() as cursor:
@@ -1376,7 +1637,7 @@ def process_and_update_state(file_info, state_file_path, args, conn, engine, exi
                 # Existing table - append new geometries
                 new_geoms, _, identical_geoms = compare_geometries(
                     gdf, conn, target_table, target_geom_col, schema=schema, 
-                    exclude_columns=[], args=args
+                    exclude_columns=[], args=args, engine=engine
                 )
                 
                 num_new = len(new_geoms) if new_geoms is not None else 0
