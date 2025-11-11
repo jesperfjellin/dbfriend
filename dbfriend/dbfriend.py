@@ -11,11 +11,9 @@ import re
 import subprocess
 import sys
 import time
-from collections import defaultdict
 from typing import List
 from typing import Set
 import geopandas as gpd
-import pandas as pd
 import psycopg2
 from geopandas import GeoDataFrame
 from rich.console import Console
@@ -749,7 +747,7 @@ def compare_geometries(gdf: GeoDataFrame, conn, table_name: str, geom_column: st
             if attr_hash not in existing_attr_hashes:
                 # This is an update - same geometry, different attributes
                 updated_features.append(row)
-                logger.debug(f"Detected update: same geometry, different attributes")
+                logger.debug("Detected update: same geometry, different attributes")
             else:
                 # This shouldn't happen if composite hash is working correctly
                 logger.warning(f"Hash logic inconsistency detected for feature at index {idx}")
@@ -1115,7 +1113,7 @@ def process_files(args, conn, engine, existing_tables, schema):
                     'table_name': table_name,
                     'gdf': gdf
                 })
-            except Exception as e:
+            except Exception:
                 # Silently skip files that can't be read as spatial data
                 logger.debug(f"Skipping '{file}' - not a readable spatial file")
                 continue
@@ -1162,13 +1160,13 @@ def process_files(args, conn, engine, existing_tables, schema):
             # Only error/warn if there are actual compatibility issues
             if not all_compatible:
                 if args.dry_run:
-                    logger.warning(f"[yellow][DRY RUN WARNING][/yellow] Geometry type compatibility issues detected:")
+                    logger.warning("[yellow][DRY RUN WARNING][/yellow] Geometry type compatibility issues detected:")
                     for issue in compatibility_issues:
                         logger.warning(f"[yellow][DRY RUN WARNING][/yellow]   - {issue}")
                     logger.warning("[yellow][DRY RUN WARNING][/yellow] In a live run, this would require --overwrite or table recreation.")
                     logger.info("[yellow][DRY RUN][/yellow] Continuing with analysis to show what would happen...")
                 else:
-                    logger.error(f"[red]Geometry type compatibility issues detected:[/red]")
+                    logger.error("[red]Geometry type compatibility issues detected:[/red]")
                     for issue in compatibility_issues:
                         logger.error(f"[red]  - {issue}[/red]")
                     logger.error("[yellow]To resolve this, you can either:[/yellow]")
@@ -1225,38 +1223,38 @@ def process_files(args, conn, engine, existing_tables, schema):
                                 total_new += len(gdf)
                                 logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would append' if args.dry_run else 'Appended'} {format(len(gdf), ',').replace(',', ' ')} [green]new[/] geometries to '{qualified_table}'")
                         else:
-                                                    new_geoms, updated_geoms, identical_geoms = compare_geometries(
-                            gdf, conn, table_name, target_geom_col, schema=schema, 
-                            exclude_columns=[], args=args, engine=engine
-                        )
-                        
-                        num_new = len(new_geoms) if new_geoms is not None else 0
-                        num_updated = len(updated_geoms) if updated_geoms is not None else 0
-                        num_identical = len(identical_geoms) if identical_geoms is not None else 0
+                            new_geoms, updated_geoms, identical_geoms = compare_geometries(
+                                gdf, conn, table_name, target_geom_col, schema=schema,
+                                exclude_columns=[], args=args, engine=engine
+                            )
 
-                        logger.info(f"Found {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries, "
-                                  f"{format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries, and "
-                                  f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries")
-                        
-                        if new_geoms is not None and not new_geoms.empty:
-                            if not args.dry_run:
-                                new_geoms.to_postgis(
-                                    name=table_name,
-                                    con=engine,
-                                    schema=schema,
-                                    if_exists='append',
-                                    index=False
-                                )
-                            total_new += num_new
-                            logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would append' if args.dry_run else 'Successfully appended'} {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
-                        
-                        if updated_geoms is not None and not updated_geoms.empty:
-                            update_geometries(updated_geoms, table_name, engine, conn, schema=schema, dry_run=args.dry_run)
-                            total_updated += num_updated
-                            logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would update' if args.dry_run else 'Successfully updated'} {format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries")
-                        
-                        if identical_geoms is not None:
-                            total_identical += num_identical
+                            num_new = len(new_geoms) if new_geoms is not None else 0
+                            num_updated = len(updated_geoms) if updated_geoms is not None else 0
+                            num_identical = len(identical_geoms) if identical_geoms is not None else 0
+
+                            logger.info(f"Found {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries, "
+                                      f"{format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries, and "
+                                      f"{format(num_identical, ',').replace(',', ' ')} [red]identical[/] geometries")
+
+                            if new_geoms is not None and not new_geoms.empty:
+                                if not args.dry_run:
+                                    new_geoms.to_postgis(
+                                        name=table_name,
+                                        con=engine,
+                                        schema=schema,
+                                        if_exists='append',
+                                        index=False
+                                    )
+                                total_new += num_new
+                                logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would append' if args.dry_run else 'Successfully appended'} {format(num_new, ',').replace(',', ' ')} [green]new[/] geometries")
+
+                            if updated_geoms is not None and not updated_geoms.empty:
+                                update_geometries(updated_geoms, table_name, engine, conn, schema=schema, dry_run=args.dry_run)
+                                total_updated += num_updated
+                                logger.info(f"{'[yellow][DRY RUN MODE][/yellow] Would update' if args.dry_run else 'Successfully updated'} {format(num_updated, ',').replace(',', ' ')} [yellow]updated[/] geometries")
+
+                            if identical_geoms is not None:
+                                total_identical += num_identical
                     
                     elif table_name in existing_tables:
                         # Handle existing table without --table option
@@ -1698,7 +1696,7 @@ def deploy_mode(args, conn, engine, existing_tables, schema):
     """Main deploy mode function."""
     deploy_file = os.path.join(args.filepath, '.dbfriend_deploy.json')
     
-    logger.info(f"[bold cyan]🚀 Deploy mode started[/bold cyan]")
+    logger.info("[bold cyan]🚀 Deploy mode started[/bold cyan]")
     logger.info(f"[cyan]Monitoring:[/cyan] {args.filepath}")
     logger.info(f"[cyan]State file:[/cyan] {deploy_file}")
     logger.info(f"[cyan]Schema:[/cyan] {schema}")

@@ -1,6 +1,6 @@
 import pytest
 from pandas.testing import assert_frame_equal
-from unittest.mock import MagicMock, patch, mock_open, call, ANY
+from unittest.mock import MagicMock, patch, mock_open, call
 from dbfriend.dbfriend import (
     compute_geom_hash,
     get_non_essential_columns,
@@ -20,9 +20,8 @@ from dbfriend.dbfriend import (
 import hashlib
 from geopandas import GeoDataFrame, GeoSeries
 from geopandas.testing import assert_geodataframe_equal
-from shapely.geometry import Point, LineString, Polygon
+from shapely.geometry import Point
 import psycopg2
-import sys
 from sqlalchemy import create_engine
 import os
 import pandas as pd
