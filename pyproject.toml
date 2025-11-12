@@ -18,6 +18,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "fiona>=1.8.22",
     "geopandas",
     "pandas",
     "psycopg2-binary",
